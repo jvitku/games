@@ -465,10 +465,13 @@ class HockeyIceAdventure {
     }
     
     updatePlayerMovement(delta, time) {
-        // Smooth player movement (works in any game state)
+        // Very fast, responsive player movement (works in any game state)
         if (this.player) {
             const oldPos = { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
-            this.player.position.lerp(this.targetPosition, 0.15);
+            
+            // Much faster movement - almost instant response (was 0.15, now 0.8-1.0)
+            this.player.position.lerp(this.targetPosition, 0.9);
+            
             const newPos = { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
             
             // Log movement every 60 frames to avoid spam

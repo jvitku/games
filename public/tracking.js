@@ -55,8 +55,8 @@ class GenericFeatureTracker {
         this.objectPosition = { x: 0.5, y: 0.5 };
         this.lastValidPosition = { x: 0.5, y: 0.5 };
         this.positionHistory = [];
-        this.maxHistorySize = 5;
-        this.jumpThreshold = 0.12; // Stricter jump detection
+        this.maxHistorySize = 2; // Reduced from 5 to 2 for faster response
+        this.jumpThreshold = 0.25; // Increased from 0.12 to allow faster movement
         
         // Enhanced color calibration for arbitrary object tracking
         this.targetColor = null;
@@ -882,7 +882,7 @@ class GenericFeatureTracker {
     
     updateUI() {
         try {
-            if (this.trackingQuality > 30) {
+            if (this.trackingQuality > 10) { // Reduced from 30 to 10 for more frequent updates
                 console.log('Sending object position:', this.objectPosition, 'Quality:', this.trackingQuality);
                 this.socket.emit('object-position', this.objectPosition);
             }
