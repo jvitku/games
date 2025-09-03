@@ -94,8 +94,7 @@ class HockeyIceAdventure {
         const roadMaterial = new THREE.MeshLambertMaterial({ 
             color: 0x2a2a2a, // Dark asphalt base
             emissive: 0x0a0a0a,
-            emissiveIntensity: 0.05,
-            roughness: 0.9
+            emissiveIntensity: 0.05
         });
         const road = new THREE.Mesh(roadGeometry, roadMaterial);
         road.rotation.x = -Math.PI / 2;
@@ -109,8 +108,7 @@ class HockeyIceAdventure {
             transparent: true,
             opacity: 0.7,
             emissive: 0x001122,
-            emissiveIntensity: 0.1,
-            roughness: 0.1 // Very smooth ice
+            emissiveIntensity: 0.1
         });
         const iceLayer = new THREE.Mesh(iceGeometry, iceMaterial);
         iceLayer.rotation.x = -Math.PI / 2;
@@ -352,8 +350,7 @@ class HockeyIceAdventure {
         const helmetMaterial = new THREE.MeshLambertMaterial({ 
             color: 0xdd0000, // Bright red
             emissive: 0x330000,
-            emissiveIntensity: 0.1,
-            roughness: 0.3
+            emissiveIntensity: 0.1
         });
         const helmet = new THREE.Mesh(helmetGeometry, helmetMaterial);
         helmet.scale.set(1, 0.8, 1.1); // Flatten slightly for realism
@@ -417,8 +414,7 @@ class HockeyIceAdventure {
         // Grip tape area (textured section)
         const gripGeometry = new THREE.CylinderGeometry(0.045 * scale, 0.045 * scale, 0.6 * scale, 16);
         const gripMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x000000, // Black grip tape
-            roughness: 0.9
+            color: 0x000000 // Black grip tape
         });
         const grip = new THREE.Mesh(gripGeometry, gripMaterial);
         grip.position.set(0, 1.8 * scale, 0);

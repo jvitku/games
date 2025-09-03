@@ -1,11 +1,29 @@
 // Define global OpenCV callback FIRST, before anything else
 function onOpenCvReady() {
-    console.log('OpenCV.js is ready');
-    if (typeof tracker !== 'undefined' && tracker && typeof tracker.onOpenCVReady === 'function') {
-        tracker.onOpenCVReady();
-    } else {
-        console.log('Tracker not ready yet, will be called later when tracker initializes');
-    }
+    console.log('OpenCV.js loading callback triggered');
+    console.log('cv object:', typeof cv !== 'undefined' ? 'available' : 'not available');
+    console.log('cv.Mat:', typeof cv !== 'undefined' && cv.Mat ? 'available' : 'not available');
+    console.log('tracker object:', typeof tracker !== 'undefined' ? 'available' : 'not available');
+    
+    // Wait for OpenCV to be fully initialized
+    const checkAndInitialize = () => {
+        if (typeof cv !== 'undefined' && cv.Mat && cv.Mat.zeros) {
+            console.log('OpenCV fully loaded, setting ready flag');
+            window.opencvReady = true;
+            
+            if (typeof tracker !== 'undefined' && tracker && typeof tracker.onOpenCVReady === 'function') {
+                console.log('Calling tracker.onOpenCVReady()');
+                tracker.onOpenCVReady();
+            } else {
+                console.log('Tracker not ready yet, will be called later when tracker initializes');
+            }
+        } else {
+            console.log('OpenCV still loading, checking again in 50ms...');
+            setTimeout(checkAndInitialize, 50);
+        }
+    };
+    
+    checkAndInitialize();
 }
 window.onOpenCvReady = onOpenCvReady;
 
@@ -25,12 +43,19 @@ class GenericFeatureTracker {
         this.trackingCtx = this.trackingCanvas.getContext('2d');
         this.socket = io();
         
-        // MediaPipe variables
-        this.pose = null;
-        this.camera = null;
-        this.isMediaPipeReady = false;
-        this.trackedFeatureIndex = null; // Which feature/landmark we're tracking
+        // OpenCV tracking variables
+        this.trackers = [];
+        this.trackingAlgorithms = ['HybridTracker'];
+        this.currentTrackerIndex = 0;
+        this.trackingBox = null;
+        this.trackingInitialized = false;
+        this.trackingFailureCount = 0;
+        this.maxTrackingFailures = 10;
+        this.isTrackerReady = false;
         this.calibratedRegion = null; // The region we calibrated on
+        this.srcMat = null;
+        this.dstMat = null;
+        this.customTracker = {}; // Storage for optical flow tracker state
         
         console.log('Video element:', this.video);
         console.log('Canvas element:', this.trackingCanvas);
@@ -40,11 +65,15 @@ class GenericFeatureTracker {
         this.trackingQuality = 0;
         this.isTracking = false;
         this.isOpenCVReady = false;
-        this.preferMediaPipe = true; // Prefer MediaPipe over OpenCV
+        this.useOpenCVTracking = true; // Use OpenCV tracking by default
         this.isCalibrated = false;
         this.calibrationMode = false;
         this.boundingBoxMode = false;
         this.boundingBox = { startX: 0, startY: 0, endX: 0, endY: 0, isDrawing: false };
+        
+        // Performance optimization variables (legacy - kept for compatibility)
+        this.lastDetectionTime = 0;
+        this.detectionInterval = 100;
         
         // Dynamic resolution based on video feed
         this.width = 640;
@@ -72,12 +101,9 @@ class GenericFeatureTracker {
         this.contours = null;
         this.hierarchy = null;
         
-        console.log('About to initialize MediaPipe and camera...');
+        console.log('About to initialize camera and object detector...');
         
-        // Initialize MediaPipe first, then camera
-        this.initMediaPipe();
-        
-        // Ensure DOM is fully loaded before trying to access camera
+        // Initialize camera first, then object detector in background
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => {
                 console.log('DOM loaded, now initializing camera...');
@@ -85,6 +111,14 @@ class GenericFeatureTracker {
                     console.error('initWebcam failed:', error);
                     document.getElementById('status').textContent = 'Camera failed: ' + error.message;
                 });
+                // Initialize OpenCV tracker (will be ready when OpenCV loads)
+                this.initOpenCVTracker();
+                
+                // Check if OpenCV is already loaded
+                if ((typeof cv !== 'undefined' && cv.Mat && cv.Mat.zeros) || window.opencvReady) {
+                    console.log('OpenCV already loaded, calling onOpenCVReady immediately');
+                    this.onOpenCVReady();
+                }
             });
         } else {
             console.log('DOM already loaded, initializing camera immediately...');
@@ -92,6 +126,14 @@ class GenericFeatureTracker {
                 console.error('initWebcam failed:', error);
                 document.getElementById('status').textContent = 'Camera failed: ' + error.message;
             });
+            // Initialize OpenCV tracker (will be ready when OpenCV loads)
+            this.initOpenCVTracker();
+            
+            // Check if OpenCV is already loaded
+            if ((typeof cv !== 'undefined' && cv.Mat && cv.Mat.zeros) || window.opencvReady) {
+                console.log('OpenCV already loaded, calling onOpenCVReady immediately');
+                this.onOpenCVReady();
+            }
         }
     }
     
@@ -196,118 +238,899 @@ class GenericFeatureTracker {
         }
     }
     
-    initMediaPipe() {
-        console.log('=== INITIALIZING MEDIAPIPE POSE ===');
+    initOpenCVTracker() {
+        console.log('=== INITIALIZING OPENCV TRACKER ===');
+        
+        if (!this.isOpenCVReady) {
+            console.log('OpenCV not ready yet, will initialize when available');
+            return;
+        }
         
         try {
-            // Check if MediaPipe is available
-            if (typeof window.Pose === 'undefined') {
-                console.log('MediaPipe Pose not available, will use OpenCV fallback');
-                this.preferMediaPipe = false;
-                return;
-            }
+            // Initialize tracking variables
+            this.trackers = [];
+            this.trackingAlgorithms = ['CSRT', 'KCF', 'MIL', 'MOSSE']; // Multiple algorithms for reliability
+            this.currentTrackerIndex = 0;
+            this.trackingBox = null;
+            this.trackingInitialized = false;
+            this.trackingFailureCount = 0;
+            this.maxTrackingFailures = 10;
             
-            // Initialize MediaPipe Pose for feature detection
-            this.pose = new window.Pose({
-                locateFile: (file) => {
-                    return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
-                }
-            });
+            // Create OpenCV matrices for processing
+            this.srcMat = null;
+            this.dstMat = null;
             
-            this.pose.setOptions({
-                modelComplexity: 1,
-                smoothLandmarks: true,
-                enableSegmentation: false,
-                smoothSegmentation: false,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-            
-            this.pose.onResults((results) => {
-                this.onMediaPipeResults(results);
-            });
-            
-            this.isMediaPipeReady = true;
-            console.log('MediaPipe Pose initialized successfully');
+            console.log('OpenCV Tracker initialized successfully');
+            this.isTrackerReady = true;
             
         } catch (error) {
-            console.error('Failed to initialize MediaPipe:', error);
-            this.preferMediaPipe = false;
+            console.error('Failed to initialize OpenCV Tracker:', error);
+            this.isTrackerReady = false;
         }
     }
     
-    onMediaPipeResults(results) {
-        if (results.poseLandmarks && results.poseLandmarks.length > 0) {
-            // If we have a calibrated region, find the closest landmark to that region
-            if (this.calibratedRegion && this.trackedFeatureIndex === null) {
-                this.findClosestLandmarkToRegion(results.poseLandmarks);
+    createRobustHybridTracker() {
+        console.log('Creating robust hybrid tracker...');
+        
+        // Hybrid tracker combining multiple techniques for maximum robustness
+        return {
+            isCustomTracker: true,
+            boundingBox: null,
+            
+            // Multi-modal tracking data
+            opticalFlowPoints: null,
+            templateImage: null,
+            colorHistogram: null,
+            prevGray: null,
+            templateSize: { width: 0, height: 0 },
+            
+            // Tracking confidence weights
+            confidenceWeights: {
+                opticalFlow: 0.4,
+                templateMatching: 0.3,
+                colorTracking: 0.3
+            },
+            
+            // Tracking results from each method
+            results: {
+                opticalFlow: null,
+                templateMatching: null,
+                colorTracking: null
+            },
+            
+            init: function(frame, rect) {
+                try {
+                    console.log('Initializing robust hybrid tracker with rect:', rect);
+                    this.boundingBox = {
+                        x: rect.x, y: rect.y, 
+                        width: rect.width, height: rect.height
+                    };
+                    
+                    // 1. OPTICAL FLOW INITIALIZATION
+                    const points = [];
+                    const stepX = Math.max(4, Math.floor(rect.width / 12));
+                    const stepY = Math.max(4, Math.floor(rect.height / 12));
+                    
+                    for (let y = rect.y + stepY; y < rect.y + rect.height - stepY; y += stepY) {
+                        for (let x = rect.x + stepX; x < rect.x + rect.width - stepX; x += stepX) {
+                            points.push([x, y]);
+                        }
+                    }
+                    
+                    this.opticalFlowPoints = cv.matFromArray(points.length, 1, cv.CV_32FC2, points.flat());
+                    
+                    // 2. TEMPLATE MATCHING INITIALIZATION
+                    try {
+                        const templateRect = new cv.Rect(rect.x, rect.y, rect.width, rect.height);
+                        this.templateImage = frame.roi(templateRect).clone();
+                        templateRect.delete();
+                    } catch (error) {
+                        // Fallback: manual ROI extraction
+                        console.log('Using fallback ROI extraction for template');
+                        this.templateImage = frame.roi(rect).clone();
+                    }
+                    this.templateSize = { width: rect.width, height: rect.height };
+                    
+                    // 3. COLOR HISTOGRAM INITIALIZATION
+                    const roi = frame.roi(rect);
+                    const hsvRoi = new cv.Mat();
+                    cv.cvtColor(roi, hsvRoi, cv.COLOR_RGB2HSV);
+                    
+                    // Create histogram
+                    const hist = new cv.Mat();
+                    const histSize = [50, 60]; // H and S bins
+                    const ranges = [0, 180, 0, 256]; // H: 0-180, S: 0-255
+                    const channels = [0, 1]; // H and S channels
+                    
+                    // Create MatVector properly
+                    const srcVec = new cv.MatVector();
+                    srcVec.push_back(hsvRoi);
+                    const mask = new cv.Mat();
+                    
+                    cv.calcHist(srcVec, channels, mask, hist, histSize, ranges);
+                    cv.normalize(hist, hist, 0, 255, cv.NORM_MINMAX);
+                    
+                    // Clean up
+                    srcVec.delete();
+                    mask.delete();
+                    
+                    this.colorHistogram = hist;
+                    
+                    // 4. GRAYSCALE FRAME FOR OPTICAL FLOW
+                    this.prevGray = cv.Mat.zeros(frame.rows, frame.cols, cv.CV_8UC1);
+                    cv.cvtColor(frame, this.prevGray, cv.COLOR_RGB2GRAY);
+                    
+                    // Clean up temporary matrices
+                    roi.delete();
+                    hsvRoi.delete();
+                    
+                    console.log(`Hybrid tracker initialized: ${points.length} flow points, template ${rect.width}x${rect.height}, color histogram`);
+                    return true;
+                    
+                } catch (error) {
+                    console.error('Error initializing hybrid tracker:', error);
+                    return false;
+                }
+            },
+            
+            update: function(frame, outputRect) {
+                try {
+                    // Reset results
+                    this.results = {
+                        opticalFlow: null,
+                        templateMatching: null,
+                        colorTracking: null
+                    };
+                    
+                    const gray = cv.Mat.zeros(frame.rows, frame.cols, cv.CV_8UC1);
+                    cv.cvtColor(frame, gray, cv.COLOR_RGB2GRAY);
+                    
+                    // Get reference to main tracker instance for method calls
+                    const mainTracker = window.tracker || this;
+                    
+                    // 1. OPTICAL FLOW TRACKING
+                    try {
+                        this.results.opticalFlow = mainTracker.performOpticalFlowTracking(this, frame, gray);
+                        console.log('Optical flow result:', !!this.results.opticalFlow);
+                    } catch (error) {
+                        console.error('Optical flow tracking failed:', error);
+                        this.results.opticalFlow = null;
+                    }
+                    
+                    // 2. TEMPLATE MATCHING
+                    try {
+                        this.results.templateMatching = mainTracker.performTemplateMatching(this, gray);
+                        console.log('Template matching result:', !!this.results.templateMatching);
+                    } catch (error) {
+                        console.error('Template matching failed:', error);
+                        this.results.templateMatching = null;
+                    }
+                    
+                    // 3. COLOR-BASED TRACKING
+                    try {
+                        this.results.colorTracking = mainTracker.performColorTracking(this, frame);
+                        console.log('Color tracking result:', !!this.results.colorTracking);
+                    } catch (error) {
+                        console.error('Color tracking failed:', error);
+                        this.results.colorTracking = null;
+                    }
+                    
+                    // 4. FUSION OF RESULTS
+                    const fusedResult = mainTracker.fuseTrackingResults(this);
+                    
+                    if (!fusedResult) {
+                        gray.delete();
+                        return false;
+                    }
+                    
+                    // Update output rect
+                    outputRect.x = fusedResult.x;
+                    outputRect.y = fusedResult.y;
+                    outputRect.width = fusedResult.width;
+                    outputRect.height = fusedResult.height;
+                    
+                    // Update tracker state for next frame
+                    mainTracker.updateTrackerState(this, frame, gray, fusedResult);
+                    
+                    gray.delete();
+                    return true;
+                    
+                } catch (error) {
+                    console.error('Error in hybrid tracking:', error);
+                    return false;
+                }
+            },
+            
+            
+            delete: function() {
+                try {
+                    if (this.opticalFlowPoints) {
+                        this.opticalFlowPoints.delete();
+                        this.opticalFlowPoints = null;
+                    }
+                    if (this.templateImage) {
+                        this.templateImage.delete();
+                        this.templateImage = null;
+                    }
+                    if (this.colorHistogram) {
+                        this.colorHistogram.delete();
+                        this.colorHistogram = null;
+                    }
+                    if (this.prevGray) {
+                        this.prevGray.delete();
+                        this.prevGray = null;
+                    }
+                } catch (error) {
+                    console.error('Error cleaning up hybrid tracker:', error);
+                }
+            }
+        };
+    }
+    
+    initializeTracking(boundingBox) {
+        console.log('=== INITIALIZING OPENCV TRACKING ===');
+        console.log('Bounding box:', boundingBox);
+        
+        if (!this.isOpenCVReady) {
+            console.error('OpenCV not ready');
+            console.error('Debug info:', {
+                isOpenCVReady: this.isOpenCVReady,
+                cvDefined: typeof cv !== 'undefined',
+                cvMat: typeof cv !== 'undefined' && !!cv.Mat,
+                onOpenCVReadyCalled: !!this.onOpenCVReadyCalled
+            });
+            return false;
+        }
+        
+        if (!this.srcMat) {
+            console.error('srcMat not initialized');
+            return false;
+        }
+        
+        if (typeof cv === 'undefined') {
+            console.error('OpenCV cv object not available');
+            return false;
+        }
+        
+        try {
+            // Clear any existing trackers
+            console.log('Clearing existing trackers, count before:', this.trackers.length);
+            this.clearTrackers();
+            console.log('Trackers cleared, count after:', this.trackers.length);
+            
+            // Create the robust hybrid tracker
+            console.log('Creating robust hybrid tracker...');
+            const tracker = this.createRobustHybridTracker();
+            if (!tracker) {
+                console.error('Failed to create robust hybrid tracker');
+                return false;
+            }
+            console.log('Hybrid tracker created successfully');
+            
+            // Create bounding box object for hybrid tracker
+            const rect = {
+                x: Math.round(boundingBox.x), 
+                y: Math.round(boundingBox.y), 
+                width: Math.round(boundingBox.width), 
+                height: Math.round(boundingBox.height)
+            };
+            
+            // Initialize tracker with current frame
+            console.log('Updating OpenCV frame before tracker initialization...');
+            const frameSuccess = this.updateOpenCVFrame();
+            if (!frameSuccess) {
+                console.error('Failed to capture video frame');
+                tracker.delete();
+                return false;
             }
             
-            // Track the selected landmark or use a default one
-            let targetLandmark = null;
-            if (this.trackedFeatureIndex !== null && this.trackedFeatureIndex < results.poseLandmarks.length) {
-                targetLandmark = results.poseLandmarks[this.trackedFeatureIndex];
-            } else if (results.poseLandmarks.length > 0) {
-                // Default to nose (index 0) or wrist (index 15/16) if no specific feature selected
-                targetLandmark = results.poseLandmarks[15] || results.poseLandmarks[16] || results.poseLandmarks[0];
+            console.log('Initializing tracker with frame and bounding box...');
+            const success = tracker.init(this.srcMat, rect);
+            console.log('Tracker initialization result:', success);
+            
+            if (success) {
+                console.log('Adding tracker to array, current count:', this.trackers.length);
+                this.trackers.push({
+                    tracker: tracker,
+                    algorithm: 'HybridTracker',
+                    rect: rect,
+                    confidence: 1.0
+                });
+                console.log('Tracker added, new count:', this.trackers.length);
+                
+                this.trackingBox = boundingBox;
+                this.trackingInitialized = true;
+                this.trackingFailureCount = 0;
+                this.trackingQuality = 100;
+                
+                console.log('=== TRACKING INITIALIZATION SUCCESS ===', {
+                    trackingInitialized: this.trackingInitialized,
+                    trackersCount: this.trackers.length,
+                    trackingQuality: this.trackingQuality,
+                    isCalibrated: this.isCalibrated,
+                    boundingBox: this.trackingBox
+                });
+                
+                return true;
+            } else {
+                console.error('Failed to initialize tracker');
+                tracker.delete();
+                return false;
             }
             
-            if (targetLandmark) {
-                const centerX = targetLandmark.x * this.width;
-                const centerY = targetLandmark.y * this.height;
-                
-                const position = {
-                    x: targetLandmark.x,
-                    y: targetLandmark.y
-                };
-                
-                this.applyPositionWithSmoothing(position);
-                this.trackingQuality = Math.min(95, targetLandmark.visibility * 100);
-                
-                // Draw MediaPipe tracking visualization
-                this.drawMediaPipeTracking(centerX, centerY, targetLandmark, this.trackedFeatureIndex);
-            }
-        } else {
-            this.trackingQuality = Math.max(0, this.trackingQuality - 5);
+        } catch (error) {
+            console.error('Error initializing tracking:', error);
+            return false;
         }
     }
     
-    findClosestLandmarkToRegion(landmarks) {
-        if (!this.calibratedRegion) return;
-        
-        const regionCenterX = (this.calibratedRegion.left + this.calibratedRegion.right) / 2 / this.width;
-        const regionCenterY = (this.calibratedRegion.top + this.calibratedRegion.bottom) / 2 / this.height;
-        
-        let closestIndex = 0;
-        let minDistance = Infinity;
-        
-        landmarks.forEach((landmark, index) => {
-            const distance = Math.sqrt(
-                Math.pow(landmark.x - regionCenterX, 2) + 
-                Math.pow(landmark.y - regionCenterY, 2)
-            );
-            
-            if (distance < minDistance) {
-                minDistance = distance;
-                closestIndex = index;
-            }
+    performOpenCVTracking() {
+        console.log('=== PERFORM OPENCV TRACKING ===', {
+            trackingInitialized: this.trackingInitialized,
+            isOpenCVReady: this.isOpenCVReady,
+            trackersLength: this.trackers.length,
+            trackingQuality: this.trackingQuality
         });
         
-        this.trackedFeatureIndex = closestIndex;
-        console.log(`Selected landmark ${closestIndex} as closest to calibrated region`);
+        if (!this.trackingInitialized || !this.isOpenCVReady || this.trackers.length === 0) {
+            console.log('Tracking requirements not met, returning');
+            return;
+        }
+        
+        try {
+            this.updateOpenCVFrame();
+            
+            let bestTracker = null;
+            let bestRect = null;
+            let bestConfidence = 0;
+            
+            // Update all active trackers
+            for (let i = this.trackers.length - 1; i >= 0; i--) {
+                const trackerObj = this.trackers[i];
+                const rect = { x: 0, y: 0, width: 0, height: 0 };
+                
+                try {
+                    const success = trackerObj.tracker.update(this.srcMat, rect);
+                    
+                    if (success) {
+                        // Calculate confidence based on tracking quality heuristics
+                        const confidence = this.calculateTrackingConfidence(rect, trackerObj.rect);
+                        trackerObj.confidence = confidence;
+                        trackerObj.rect = rect;
+                        
+                        if (confidence > bestConfidence) {
+                            bestConfidence = confidence;
+                            bestTracker = trackerObj;
+                            bestRect = rect;
+                        }
+                    } else {
+                        // Remove failed tracker
+                        console.log(`Tracker ${trackerObj.algorithm} failed, removing`);
+                        trackerObj.tracker.delete();
+                        this.trackers.splice(i, 1);
+                    }
+                } catch (error) {
+                    console.error(`Error updating tracker ${trackerObj.algorithm}:`, error);
+                    trackerObj.tracker.delete();
+                    this.trackers.splice(i, 1);
+                }
+            }
+            
+            if (bestTracker && bestRect) {
+                // Update tracking position
+                const centerX = bestRect.x + bestRect.width / 2;
+                const centerY = bestRect.y + bestRect.height / 2;
+                
+                const position = {
+                    x: centerX / this.width,
+                    y: centerY / this.height
+                };
+                
+                console.log('OpenCV Tracking Position:', {
+                    rect: bestRect,
+                    center: { x: centerX, y: centerY },
+                    normalized: position,
+                    algorithm: bestTracker.algorithm
+                });
+                
+                this.applyPositionWithSmoothing(position);
+                this.trackingQuality = Math.round(bestConfidence * 100);
+                
+                // Update tracking box
+                this.trackingBox = {
+                    x: bestRect.x,
+                    y: bestRect.y,
+                    width: bestRect.width,
+                    height: bestRect.height
+                };
+                
+                // Draw tracking visualization
+                this.drawOpenCVTracking(bestRect, bestTracker);
+                
+                this.trackingFailureCount = 0;
+            } else {
+                // No successful tracking
+                this.trackingFailureCount++;
+                this.trackingQuality = Math.max(0, this.trackingQuality - 10);
+                
+                console.log(`Tracking failure count: ${this.trackingFailureCount}/${this.maxTrackingFailures}`);
+                
+                if (this.trackingFailureCount >= this.maxTrackingFailures) {
+                    console.log('Maximum tracking failures reached, need re-calibration');
+                    this.resetTracking();
+                }
+            }
+            
+        } catch (error) {
+            console.error('Error in OpenCV tracking:', error);
+            this.trackingFailureCount++;
+        }
+    }
+    
+    calculateTrackingConfidence(currentRect, previousRect) {
+        try {
+            // Simple heuristics for tracking confidence
+            // Based on size change and movement distance
+            
+            const sizeRatio = (currentRect.width * currentRect.height) / (previousRect.width * previousRect.height);
+            const sizeChange = Math.abs(1 - sizeRatio);
+            
+            const dx = Math.abs(currentRect.x - previousRect.x);
+            const dy = Math.abs(currentRect.y - previousRect.y);
+            const movement = Math.sqrt(dx * dx + dy * dy);
+            
+            // Confidence decreases with large size changes and excessive movement
+            let confidence = 1.0;
+            confidence -= Math.min(0.3, sizeChange); // Penalty for size change
+            confidence -= Math.min(0.3, movement / 100); // Penalty for large movement
+            
+            // Ensure bounds are valid
+            if (currentRect.x < 0 || currentRect.y < 0 || 
+                currentRect.x + currentRect.width > this.width ||
+                currentRect.y + currentRect.height > this.height) {
+                confidence *= 0.5; // Penalty for going out of bounds
+            }
+            
+            return Math.max(0, confidence);
+        } catch (error) {
+            console.error('Error calculating tracking confidence:', error);
+            return 0.5;
+        }
+    }
+    
+    updateOpenCVFrame() {
+        if (!this.isOpenCVReady || !this.srcMat || !this.video) return;
+        
+        try {
+            // Check if video is ready
+            if (this.video.readyState !== this.video.HAVE_ENOUGH_DATA) {
+                console.log('Video not ready for frame capture');
+                return false;
+            }
+            
+            // Create a temporary canvas to capture video frame
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = this.width;
+            tempCanvas.height = this.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            
+            // Draw video frame to temporary canvas (mirrored to match tracking canvas)
+            tempCtx.save();
+            tempCtx.scale(-1, 1);
+            tempCtx.drawImage(this.video, -this.width, 0, this.width, this.height);
+            tempCtx.restore();
+            
+            // Get image data and copy to OpenCV matrix
+            const imageData = tempCtx.getImageData(0, 0, this.width, this.height);
+            this.dstMat.data.set(imageData.data);
+            
+            // Convert from RGBA to RGB for OpenCV tracking
+            cv.cvtColor(this.dstMat, this.srcMat, cv.COLOR_RGBA2RGB);
+            
+            return true;
+            
+        } catch (error) {
+            console.error('Error updating OpenCV frame:', error);
+            return false;
+        }
+    }
+    
+    clearTrackers() {
+        try {
+            console.log('=== CLEAR TRACKERS CALLED ===', {
+                currentTrackers: this.trackers.length,
+                stackTrace: new Error().stack.split('\n')[2] // Show where this was called from
+            });
+            
+            this.trackers.forEach(trackerObj => {
+                if (trackerObj.tracker) {
+                    trackerObj.tracker.delete();
+                }
+                if (trackerObj.rect) {
+                    trackerObj.rect.delete();
+                }
+            });
+            this.trackers = [];
+            
+            console.log('Trackers cleared, new length:', this.trackers.length);
+        } catch (error) {
+            console.error('Error clearing trackers:', error);
+        }
+    }
+    
+    resetTracking() {
+        console.log('=== RESETTING TRACKING ===', {
+            stackTrace: new Error().stack.split('\n')[2] // Show where this was called from
+        });
+        
+        this.clearTrackers();
+        this.trackingInitialized = false;
+        this.trackingBox = null;
+        this.trackingFailureCount = 0;
+        this.trackingQuality = 0;
+        this.isCalibrated = false;
+        this.calibratedRegion = null;
+        
+        // Update UI
+        document.getElementById('status').textContent = 'Tracking lost. Please recalibrate.';
+        document.getElementById('trackingQuality').textContent = '0%';
+    }
+    
+    drawOpenCVTracking(rect, trackerObj) {
+        try {
+            this.trackingCtx.strokeStyle = '#00ff00';
+            this.trackingCtx.lineWidth = 3;
+            this.trackingCtx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+            
+            // Draw center point
+            const centerX = rect.x + rect.width / 2;
+            const centerY = rect.y + rect.height / 2;
+            this.trackingCtx.fillStyle = '#00ff00';
+            this.trackingCtx.beginPath();
+            this.trackingCtx.arc(centerX, centerY, 5, 0, 2 * Math.PI);
+            this.trackingCtx.fill();
+            
+            // Draw tracker info
+            this.trackingCtx.fillStyle = '#00ff00';
+            this.trackingCtx.font = '14px Arial';
+            
+            // Show active tracking methods if available
+            let trackerInfo = `${trackerObj.algorithm} (${Math.round(trackerObj.confidence * 100)}%)`;
+            if (this.customTracker && this.customTracker.results) {
+                const activeTrackers = [];
+                if (this.customTracker.results.opticalFlow) activeTrackers.push('OF');
+                if (this.customTracker.results.templateMatching) activeTrackers.push('TM');
+                if (this.customTracker.results.colorTracking) activeTrackers.push('CT');
+                if (activeTrackers.length > 0) {
+                    trackerInfo += ` [${activeTrackers.join('+')}]`;
+                }
+            }
+            
+            this.trackingCtx.fillText(trackerInfo, rect.x, rect.y - 5);
+            
+        } catch (error) {
+            console.error('Error drawing OpenCV tracking:', error);
+        }
+    }
+    
+    // OPTICAL FLOW TRACKING METHOD
+    performOpticalFlowTracking(trackerObject, frame, gray) {
+        try {
+            const tracker = trackerObject || this.customTracker;
+            if (!tracker.opticalFlowPoints || !tracker.prevGray) {
+                return null;
+            }
+            
+            const nextPts = cv.Mat.zeros(tracker.opticalFlowPoints.rows, 
+                                       tracker.opticalFlowPoints.cols, cv.CV_32FC2);
+            const status = cv.Mat.zeros(tracker.opticalFlowPoints.rows, 1, cv.CV_8UC1);
+            const err = cv.Mat.zeros(tracker.opticalFlowPoints.rows, 1, cv.CV_32FC1);
+            
+            cv.calcOpticalFlowPyrLK(
+                tracker.prevGray, gray,
+                tracker.opticalFlowPoints, nextPts,
+                status, err
+            );
+            
+            const goodPts = [];
+            const statusData = status.data;
+            
+            for (let i = 0; i < nextPts.rows; i++) {
+                if (statusData[i] === 1) {
+                    const x = nextPts.floatAt(i, 0);
+                    const y = nextPts.floatAt(i, 1);
+                    const error = err.floatAt(i, 0);
+                    
+                    // Filter by tracking error
+                    if (error < 30) {
+                        goodPts.push([x, y]);
+                    }
+                }
+            }
+            
+            nextPts.delete();
+            status.delete();
+            err.delete();
+            
+            if (goodPts.length < 4) return null;
+            
+            // Calculate center of mass
+            const centerX = goodPts.reduce((sum, p) => sum + p[0], 0) / goodPts.length;
+            const centerY = goodPts.reduce((sum, p) => sum + p[1], 0) / goodPts.length;
+            
+            const confidence = Math.min(1.0, goodPts.length / (tracker.opticalFlowPoints.rows * 0.7));
+            
+            return {
+                x: centerX - tracker.boundingBox.width / 2,
+                y: centerY - tracker.boundingBox.height / 2,
+                width: tracker.boundingBox.width,
+                height: tracker.boundingBox.height,
+                confidence: confidence,
+                goodPoints: goodPts
+            };
+            
+        } catch (error) {
+            console.error('Error in optical flow tracking:', error);
+            return null;
+        }
+    }
+    
+    // TEMPLATE MATCHING METHOD
+    performTemplateMatching(trackerObject, gray) {
+        try {
+            const tracker = trackerObject || this.customTracker;
+            if (!tracker.templateImage) return null;
+            
+            // Convert template to grayscale if needed
+            const grayTemplate = new cv.Mat();
+            if (tracker.templateImage.channels() === 3) {
+                cv.cvtColor(tracker.templateImage, grayTemplate, cv.COLOR_RGB2GRAY);
+            } else {
+                grayTemplate = tracker.templateImage.clone();
+            }
+            
+            const result = new cv.Mat();
+            cv.matchTemplate(gray, grayTemplate, result, cv.TM_CCOEFF_NORMED);
+            
+            const minMaxLoc = cv.minMaxLoc(result);
+            const maxLoc = minMaxLoc.maxLoc;
+            const confidence = minMaxLoc.maxVal;
+            
+            result.delete();
+            grayTemplate.delete();
+            
+            if (confidence < 0.5) return null;
+            
+            return {
+                x: maxLoc.x,
+                y: maxLoc.y,
+                width: tracker.templateSize.width,
+                height: tracker.templateSize.height,
+                confidence: confidence
+            };
+            
+        } catch (error) {
+            console.error('Error in template matching:', error);
+            return null;
+        }
+    }
+    
+    // COLOR-BASED TRACKING METHOD
+    performColorTracking(trackerObject, frame) {
+        try {
+            const tracker = trackerObject || this.customTracker;
+            if (!tracker.colorHistogram) return null;
+            
+            const hsv = new cv.Mat();
+            cv.cvtColor(frame, hsv, cv.COLOR_RGB2HSV);
+            
+            const backproj = new cv.Mat();
+            const channels = [0, 1]; // H and S channels
+            const ranges = [0, 180, 0, 256];
+            const scale = 1;
+            
+            const hsvVec = new cv.MatVector();
+            hsvVec.push_back(hsv);
+            
+            cv.calcBackProject(hsvVec, channels, 
+                             tracker.colorHistogram, backproj, ranges, scale);
+            
+            hsvVec.delete();
+            
+            // Use morphological operations to clean up the backprojection
+            const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+            cv.morphologyEx(backproj, backproj, cv.MORPH_CLOSE, kernel);
+            cv.morphologyEx(backproj, backproj, cv.MORPH_OPEN, kernel);
+            
+            // Find contours
+            const contours = new cv.MatVector();
+            const hierarchy = new cv.Mat();
+            cv.findContours(backproj, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            
+            if (contours.size() === 0) {
+                hsv.delete();
+                backproj.delete();
+                kernel.delete();
+                contours.delete();
+                hierarchy.delete();
+                return null;
+            }
+            
+            // Find largest contour
+            let maxArea = 0;
+            let maxContour = null;
+            for (let i = 0; i < contours.size(); i++) {
+                const area = cv.contourArea(contours.get(i));
+                if (area > maxArea) {
+                    maxArea = area;
+                    maxContour = contours.get(i);
+                }
+            }
+            
+            if (!maxContour || maxArea < 100) {
+                hsv.delete();
+                backproj.delete();
+                kernel.delete();
+                contours.delete();
+                hierarchy.delete();
+                return null;
+            }
+            
+            const boundRect = cv.boundingRect(maxContour);
+            const expectedArea = tracker.boundingBox.width * tracker.boundingBox.height;
+            const confidence = Math.min(1.0, maxArea / expectedArea);
+            
+            // Clean up
+            hsv.delete();
+            backproj.delete();
+            kernel.delete();
+            contours.delete();
+            hierarchy.delete();
+            
+            return {
+                x: boundRect.x,
+                y: boundRect.y,
+                width: boundRect.width,
+                height: boundRect.height,
+                confidence: confidence
+            };
+            
+        } catch (error) {
+            console.error('Error in color tracking:', error);
+            return null;
+        }
+    }
+    
+    // FUSION OF TRACKING RESULTS
+    fuseTrackingResults(trackerObject) {
+        // Use passed tracker object or fall back to class property
+        const tracker = trackerObject || this.customTracker;
+        
+        // Ensure results object exists
+        if (!tracker.results) {
+            console.error('Results object not found in tracker', tracker);
+            return null;
+        }
+        
+        // Ensure weights object exists
+        if (!tracker.confidenceWeights) {
+            console.error('Confidence weights not found in tracker', tracker);
+            return null;
+        }
+        
+        const results = tracker.results;
+        const weights = tracker.confidenceWeights;
+        
+        console.log('Fusion Debug:', {
+            opticalFlow: !!results.opticalFlow,
+            templateMatching: !!results.templateMatching,
+            colorTracking: !!results.colorTracking,
+            ofConf: results.opticalFlow?.confidence,
+            tmConf: results.templateMatching?.confidence,
+            ctConf: results.colorTracking?.confidence
+        });
+        
+        // Filter valid results
+        const validResults = [];
+        if (results.opticalFlow) validResults.push({...results.opticalFlow, type: 'opticalFlow'});
+        if (results.templateMatching) validResults.push({...results.templateMatching, type: 'templateMatching'});
+        if (results.colorTracking) validResults.push({...results.colorTracking, type: 'colorTracking'});
+        
+        console.log('Valid tracking results:', validResults.length);
+        if (validResults.length === 0) return null;
+        
+        // Weighted average of positions
+        let totalWeight = 0;
+        let weightedX = 0, weightedY = 0, weightedW = 0, weightedH = 0;
+        
+        validResults.forEach(result => {
+            const weight = weights[result.type] * result.confidence;
+            totalWeight += weight;
+            weightedX += result.x * weight;
+            weightedY += result.y * weight;
+            weightedW += result.width * weight;
+            weightedH += result.height * weight;
+        });
+        
+        if (totalWeight === 0) return null;
+        
+        return {
+            x: Math.max(0, Math.round(weightedX / totalWeight)),
+            y: Math.max(0, Math.round(weightedY / totalWeight)),
+            width: Math.round(weightedW / totalWeight),
+            height: Math.round(weightedH / totalWeight),
+            confidence: totalWeight / validResults.length,
+            activeTrackers: validResults.map(r => r.type)
+        };
+    }
+    
+    // UPDATE TRACKER STATE
+    updateTrackerState(trackerObject, frame, gray, result) {
+        try {
+            // Use passed tracker object or fall back to class property
+            const tracker = trackerObject || this.customTracker;
+            
+            // Update optical flow points if available
+            if (tracker.results.opticalFlow && tracker.results.opticalFlow.goodPoints) {
+                tracker.opticalFlowPoints.delete();
+                tracker.opticalFlowPoints = cv.matFromArray(
+                    tracker.results.opticalFlow.goodPoints.length, 1, cv.CV_32FC2,
+                    tracker.results.opticalFlow.goodPoints.flat()
+                );
+            }
+            
+            // Update template if template matching confidence is high
+            if (tracker.results.templateMatching && 
+                tracker.results.templateMatching.confidence > 0.8) {
+                const rectObj = { x: result.x, y: result.y, width: result.width, height: result.height };
+                if (rectObj.x >= 0 && rectObj.y >= 0 && 
+                    rectObj.x + rectObj.width <= frame.cols &&
+                    rectObj.y + rectObj.height <= frame.rows) {
+                    tracker.templateImage.delete();
+                    tracker.templateImage = frame.roi(rectObj).clone();
+                }
+            }
+            
+            // Update previous frame for optical flow
+            tracker.prevGray.delete();
+            tracker.prevGray = gray.clone();
+            
+            // Update bounding box
+            tracker.boundingBox = {
+                x: result.x, y: result.y,
+                width: result.width, height: result.height
+            };
+            
+        } catch (error) {
+            console.error('Error updating tracker state:', error);
+        }
     }
     
     onOpenCVReady() {
         console.log('=== OPENCV READY ===');
+        
+        // Check if OpenCV is actually fully loaded
+        if (typeof cv === 'undefined' || !cv.Mat || !cv.Mat.zeros) {
+            console.log('OpenCV not fully loaded yet, waiting...');
+            // Try again after a short delay
+            setTimeout(() => {
+                this.onOpenCVReady();
+            }, 100);
+            return;
+        }
+        
         this.isOpenCVReady = true;
+        this.onOpenCVReadyCalled = true;
         this.initializeOpenCVMatrices();
         
-        // Update status based on current state and preferred tracking method
-        const trackingMethod = this.preferMediaPipe && this.isMediaPipeReady ? 'MediaPipe' : 'OpenCV';
+        // Now initialize the OpenCV tracker since OpenCV is ready
+        this.initOpenCVTracker();
+        
+        // Update status based on current state
         if (this.video && this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
-            document.getElementById('status').textContent = `Ready (${trackingMethod})! Click Calibrate to select object to track.`;
+            document.getElementById('status').textContent = 'Ready (OpenCV)! Click Calibrate to select bounding box to track.';
         } else {
-            document.getElementById('status').textContent = `${trackingMethod} loaded, waiting for camera...`;
+            document.getElementById('status').textContent = 'OpenCV loaded, waiting for camera...';
         }
     }
     
@@ -351,14 +1174,32 @@ class GenericFeatureTracker {
     
     initializeOpenCVMatrices() {
         try {
-            // Initialize OpenCV matrices for processing
-            this.src = new cv.Mat(this.height, this.width, cv.CV_8UC4);
-            this.hsv = new cv.Mat(this.height, this.width, cv.CV_8UC3);
-            this.mask = new cv.Mat(this.height, this.width, cv.CV_8UC1);
+            console.log('Initializing OpenCV matrices with dimensions:', this.width, 'x', this.height);
+            console.log('Available OpenCV objects:', {
+                Mat: !!cv.Mat,
+                'Mat.zeros': !!(cv.Mat && cv.Mat.zeros),
+                MatVector: !!cv.MatVector,
+                CV_8UC3: !!cv.CV_8UC3,
+                CV_8UC4: !!cv.CV_8UC4,
+                calcOpticalFlowPyrLK: !!cv.calcOpticalFlowPyrLK
+            });
+            
+            // Initialize OpenCV matrices for tracking using correct OpenCV.js API
+            this.srcMat = cv.Mat.zeros(this.height, this.width, cv.CV_8UC3);
+            this.dstMat = cv.Mat.zeros(this.height, this.width, cv.CV_8UC4); // RGBA for image capture
+            
+            // Legacy matrices for color tracking fallback
+            this.src = cv.Mat.zeros(this.height, this.width, cv.CV_8UC4);
+            this.hsv = cv.Mat.zeros(this.height, this.width, cv.CV_8UC3);
+            this.mask = cv.Mat.zeros(this.height, this.width, cv.CV_8UC1);
             this.contours = new cv.MatVector();
-            this.hierarchy = new cv.Mat();
+            this.hierarchy = cv.Mat.zeros(4, 1, cv.CV_32SC4);
+            
+            console.log('OpenCV matrices initialized successfully');
+            
         } catch (error) {
             console.error('Error initializing OpenCV matrices:', error);
+            console.error('OpenCV object structure:', Object.keys(cv).slice(0, 20));
         }
     }
     
@@ -407,20 +1248,44 @@ class GenericFeatureTracker {
                 this.trackingCtx.textAlign = 'left';
             }
             
+            // Throttled object detection to prevent UI blocking
+            const currentTime = Date.now();
+            const shouldRunDetection = currentTime - this.lastDetectionTime >= this.detectionInterval;
+            
             // Only perform tracking if calibrated and not in calibration mode
             if (this.isCalibrated && !this.calibrationMode) {
-                if (this.preferMediaPipe && this.isMediaPipeReady && this.camera) {
-                    // MediaPipe handles tracking automatically via camera onFrame callback
-                    // No need to manually send frames here - camera handles it
+                console.log('=== TRACKING FRAME ===', {
+                    isCalibrated: this.isCalibrated,
+                    calibrationMode: this.calibrationMode,
+                    useOpenCVTracking: this.useOpenCVTracking,
+                    trackingInitialized: this.trackingInitialized,
+                    trackersCount: this.trackers.length
+                });
+                
+                if (this.useOpenCVTracking && this.trackingInitialized) {
+                    // Use OpenCV feature-based tracking
+                    console.log('Calling performOpenCVTracking...');
+                    this.performOpenCVTracking();
                 } else if (this.targetColor) {
-                    console.log('Tracking calibrated object with OpenCV:', this.targetColor);
+                    console.log('Fallback: Tracking calibrated object with color tracking:', this.targetColor);
                     if (this.isOpenCVReady && typeof cv !== 'undefined') {
                         this.performObjectTracking();
                     } else {
                         // Simple fallback color tracking without OpenCV
                         this.performSimpleColorTracking();
                     }
+                } else {
+                    console.log('No tracking method available:', {
+                        useOpenCVTracking: this.useOpenCVTracking,
+                        trackingInitialized: this.trackingInitialized,
+                        targetColor: !!this.targetColor
+                    });
                 }
+            } else {
+                console.log('Not tracking:', {
+                    isCalibrated: this.isCalibrated,
+                    calibrationMode: this.calibrationMode
+                });
             }
             
             // Draw calibration overlay if in calibration mode
@@ -882,9 +1747,17 @@ class GenericFeatureTracker {
     
     updateUI() {
         try {
-            if (this.trackingQuality > 10) { // Reduced from 30 to 10 for more frequent updates
+            console.log('=== UPDATE UI ===', {
+                objectPosition: this.objectPosition,
+                trackingQuality: this.trackingQuality,
+                willSend: this.trackingQuality > 1
+            });
+            
+            if (this.trackingQuality > 1) { // Temporarily lowered to debug tracking
                 console.log('Sending object position:', this.objectPosition, 'Quality:', this.trackingQuality);
                 this.socket.emit('object-position', this.objectPosition);
+            } else {
+                console.log('Not sending - quality too low:', this.trackingQuality);
             }
             
             document.getElementById('objectPos').textContent = 
@@ -913,8 +1786,8 @@ class GenericFeatureTracker {
             'CALIBRATION MODE: Click and drag to select the object to track';
     }
     
-    calibrateFromBoundingBox() {
-        console.log('=== BOUNDING BOX CALIBRATION ===');
+    async calibrateFromBoundingBox() {
+        console.log('=== OPENCV BOUNDING BOX CALIBRATION ===');
         const bbox = this.boundingBox;
         console.log('Bounding box:', bbox);
         
@@ -927,114 +1800,55 @@ class GenericFeatureTracker {
             const width = right - left;
             const height = bottom - top;
             
-            if (width < 10 || height < 10) {
-                throw new Error('Bounding box too small - drag a larger area');
+            if (width < 20 || height < 20) {
+                throw new Error('Bounding box too small - drag a larger area (minimum 20x20 pixels)');
             }
             
-            console.log('Sampling area:', { left, top, width, height });
+            console.log('Calibration area:', { left, top, width, height });
             
-            // Sample pixels within the bounding box
-            const imageData = this.trackingCtx.getImageData(left, top, width, height);
-            const data = imageData.data;
-            const samples = [];
+            // Store the calibrated region
+            this.calibratedRegion = { left, top, right, bottom };
             
-            // Sample every few pixels for performance
-            const step = Math.max(2, Math.floor(Math.min(width, height) / 20));
-            
-            for (let y = 0; y < height; y += step) {
-                for (let x = 0; x < width; x += step) {
-                    const index = (y * width + x) * 4;
-                    const r = data[index];
-                    const g = data[index + 1];
-                    const b = data[index + 2];
-                    const a = data[index + 3];
-                    
-                    if (a > 0) { // Valid non-transparent pixel
-                        samples.push({ r, g, b });
-                    }
-                }
-            }
-            
-            if (samples.length === 0) {
-                throw new Error('No valid pixels found in bounding box');
-            }
-            
-            console.log(`Found ${samples.length} pixel samples in bounding box`);
-            
-            // Calculate average color from samples
-            let avgR = 0, avgG = 0, avgB = 0;
-            samples.forEach(sample => {
-                avgR += sample.r;
-                avgG += sample.g;
-                avgB += sample.b;
-            });
-            avgR = Math.round(avgR / samples.length);
-            avgG = Math.round(avgG / samples.length);
-            avgB = Math.round(avgB / samples.length);
-            
-            console.log('Average color from bounding box:', { r: avgR, g: avgG, b: avgB });
-            
-            // Convert to HSV
-            const hsv = this.rgbToHsv(avgR, avgG, avgB);
-            console.log('Converted to HSV:', hsv);
-            
-            // Analyze color variance for adaptive tolerances
-            let rVariance = 0, gVariance = 0, bVariance = 0;
-            samples.forEach(sample => {
-                rVariance += Math.pow(sample.r - avgR, 2);
-                gVariance += Math.pow(sample.g - avgG, 2);
-                bVariance += Math.pow(sample.b - avgB, 2);
-            });
-            const variance = Math.sqrt((rVariance + gVariance + bVariance) / (samples.length * 3));
-            
-            // More conservative tolerances for better accuracy
-            const baseHueTolerance = 20;
-            const baseSatTolerance = 60;
-            const baseValTolerance = 60;
-            
-            // Moderate adaptive factor for better precision
-            const adaptiveFactor = Math.min(2.0, Math.max(1.0, variance / 40));
-            
-            this.colorTolerance = {
-                h: Math.round(baseHueTolerance * adaptiveFactor),
-                s: Math.round(baseSatTolerance * adaptiveFactor),
-                v: Math.round(baseValTolerance * adaptiveFactor)
+            // Initialize OpenCV tracking with the selected bounding box
+            const trackingBoundingBox = {
+                x: left,
+                y: top,
+                width: width,
+                height: height
             };
             
-            // Store the bounding box area for size-based filtering and MediaPipe region
-            this.expectedSize = { width, height, area: width * height };
-            this.calibratedRegion = { left, top, right: left + width, bottom: top + height };
-            this.trackedFeatureIndex = null; // Reset feature selection for MediaPipe
+            const success = this.initializeTracking(trackingBoundingBox);
             
-            console.log('Adaptive tolerances:', this.colorTolerance);
-            console.log('Expected object size:', this.expectedSize);
-            
-            this.targetColor = hsv;
-            this.isCalibrated = true;
-            this.positionHistory = [];
-            this.trackingQuality = 0;
-            
-            // Exit calibration mode and start tracking automatically
-            this.calibrationMode = false;
-            this.boundingBoxMode = false;
-            
-            // Initialize MediaPipe camera if preferred and available
-            if (this.preferMediaPipe && this.isMediaPipeReady && !this.camera) {
-                this.initMediaPipeCamera();
+            if (success) {
+                this.isCalibrated = true;
+                this.calibrationMode = false;
+                this.boundingBoxMode = false;
+                
+                console.log('=== CALIBRATION SUCCESSFUL ===', {
+                    isCalibrated: this.isCalibrated,
+                    calibrationMode: this.calibrationMode,
+                    boundingBoxMode: this.boundingBoxMode,
+                    trackingInitialized: this.trackingInitialized,
+                    useOpenCVTracking: this.useOpenCVTracking
+                });
+                
+                document.getElementById('status').textContent = 'OpenCV tracking initialized! Object is being tracked.';
+            } else {
+                throw new Error('Failed to initialize OpenCV tracking');
             }
-            
-            const trackingMethod = (this.preferMediaPipe && this.isMediaPipeReady) ? 'MediaPipe' : 'OpenCV';
-            document.getElementById('status').textContent = 
-                `TRACKING STARTED with ${trackingMethod}! Object selected (${width}x${height}px) - Move object to test tracking`;
-            
-            console.log('=== BOUNDING BOX CALIBRATION SUCCESS - TRACKING STARTED ===');
             
         } catch (error) {
             console.error('=== CALIBRATION FAILED ===');
             console.error('Error:', error);
             document.getElementById('status').textContent = 'Calibration failed! ' + error.message;
+            
+            // Reset calibration state on failure
+            this.calibrationMode = false;
+            this.boundingBoxMode = false;
+            this.isCalibrated = false;
         }
     }
+    
     
     drawBoundingBox() {
         if (!this.boundingBox.isDrawing && this.boundingBox.startX === this.boundingBox.endX) return;
@@ -1097,99 +1911,10 @@ class GenericFeatureTracker {
         return { h: h / 2, s: s * 255, v: v * 255 }; // OpenCV HSV ranges
     }
     
-    initMediaPipeCamera() {
-        console.log('=== INITIALIZING MEDIAPIPE CAMERA ===');
-        
-        try {
-            if (typeof window.Camera === 'undefined') {
-                console.error('MediaPipe Camera not available');
-                return;
-            }
-            
-            this.camera = new window.Camera(this.video, {
-                onFrame: async () => {
-                    try {
-                        if (this.pose && this.isCalibrated && !this.calibrationMode) {
-                            await this.pose.send({image: this.video});
-                        }
-                    } catch (error) {
-                        console.error('MediaPipe send error:', error);
-                    }
-                },
-                width: this.width,
-                height: this.height
-            });
-            
-            this.camera.start();
-            console.log('MediaPipe camera started successfully');
-            
-        } catch (error) {
-            console.error('Failed to initialize MediaPipe camera:', error);
-            this.preferMediaPipe = false;
-        }
-    }
+    // MediaPipe camera initialization no longer needed for object detection
+    // Object detection runs directly on video frames
     
-    drawMediaPipeTracking(centerX, centerY, landmark, landmarkIndex) {
-        try {
-            const confidence = landmark.visibility || this.trackingQuality / 100;
-            const qualityColor = confidence > 0.7 ? '#00FF00' : 
-                                confidence > 0.4 ? '#FFFF00' : '#FF8800';
-            
-            // Fix mirrored position - since video is mirrored, we need to un-mirror the display
-            const correctedX = this.width - centerX;
-            
-            // Draw a fixed-size bounding box around the tracked feature
-            const boxSize = 60; // Fixed size box
-            const halfBox = boxSize / 2;
-            
-            // Draw bounding rectangle (using corrected position)
-            this.trackingCtx.strokeStyle = qualityColor;
-            this.trackingCtx.lineWidth = 3;
-            this.trackingCtx.strokeRect(correctedX - halfBox, centerY - halfBox, boxSize, boxSize);
-            
-            // Draw corner markers
-            const cornerSize = 8;
-            this.trackingCtx.fillStyle = qualityColor;
-            this.trackingCtx.fillRect(correctedX - halfBox - cornerSize/2, centerY - halfBox - cornerSize/2, cornerSize, cornerSize);
-            this.trackingCtx.fillRect(correctedX + halfBox - cornerSize/2, centerY - halfBox - cornerSize/2, cornerSize, cornerSize);
-            this.trackingCtx.fillRect(correctedX - halfBox - cornerSize/2, centerY + halfBox - cornerSize/2, cornerSize, cornerSize);
-            this.trackingCtx.fillRect(correctedX + halfBox - cornerSize/2, centerY + halfBox - cornerSize/2, cornerSize, cornerSize);
-            
-            // Draw center dot
-            this.trackingCtx.fillStyle = qualityColor;
-            this.trackingCtx.beginPath();
-            this.trackingCtx.arc(correctedX, centerY, 8, 0, 2 * Math.PI);
-            this.trackingCtx.fill();
-            
-            // Show tracking info with confidence
-            this.trackingCtx.fillStyle = '#FFFFFF';
-            this.trackingCtx.font = 'bold 16px Arial';
-            this.trackingCtx.strokeStyle = '#000000';
-            this.trackingCtx.lineWidth = 4;
-            const featureName = this.getLandmarkName(landmarkIndex);
-            const infoText = `FEATURE (${featureName}): ${(confidence * 100).toFixed(0)}%`;
-            this.trackingCtx.strokeText(infoText, correctedX + 50, centerY - 35);
-            this.trackingCtx.fillText(infoText, correctedX + 50, centerY - 35);
-            
-            // Show position coordinates (use corrected position for display)
-            const posText = `X:${(correctedX/this.width*100).toFixed(0)}% Y:${(centerY/this.height*100).toFixed(0)}%`;
-            this.trackingCtx.strokeText(posText, correctedX + 50, centerY - 15);
-            this.trackingCtx.fillText(posText, correctedX + 50, centerY - 15);
-            
-        } catch (error) {
-            console.error('MediaPipe tracking draw error:', error);
-        }
-    }
-    
-    getLandmarkName(index) {
-        const landmarkNames = {
-            0: 'Nose', 11: 'Left Shoulder', 12: 'Right Shoulder',
-            13: 'Left Elbow', 14: 'Right Elbow', 15: 'Left Wrist', 16: 'Right Wrist',
-            23: 'Left Hip', 24: 'Right Hip', 25: 'Left Knee', 26: 'Right Knee',
-            27: 'Left Ankle', 28: 'Right Ankle'
-        };
-        return landmarkNames[index] || `Point ${index}`;
-    }
+    // Old MediaPipe tracking methods removed - now using object detection
     
     cleanup() {
         try {
@@ -1200,14 +1925,15 @@ class GenericFeatureTracker {
             if (this.contours) this.contours.delete();
             if (this.hierarchy) this.hierarchy.delete();
             
-            // Cleanup MediaPipe
-            if (this.camera) {
-                this.camera.stop();
-                this.camera = null;
+            // Cleanup object detector
+            if (this.objectDetector) {
+                this.objectDetector.dispose();
+                this.objectDetector = null;
             }
-            if (this.pose) {
-                this.pose.close();
-                this.pose = null;
+            
+            // Cleanup TensorFlow
+            if (typeof tf !== 'undefined') {
+                tf.disposeVariables();
             }
         } catch (error) {
             console.error('Cleanup error:', error);
@@ -1242,6 +1968,7 @@ window.addEventListener('load', () => {
     console.log('Canvas initialized and ready for video');
     
     tracker = new GenericFeatureTracker();
+    window.tracker = tracker; // Set global reference for hybrid tracker methods
     
     document.getElementById('calibrateBtn').addEventListener('click', () => {
         console.log('=== CALIBRATE BUTTON CLICKED ===');
