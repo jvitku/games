@@ -61,6 +61,13 @@ class ArcadeGame {
                 this.detectShoot(data);
             }
         });
+        
+        this.socket.on('shoot-gesture', (data) => {
+            if (data.shoot && this.gameState === 'playing' && this.player.shootCooldown <= 0) {
+                this.shoot();
+                this.player.shootCooldown = 10; // Cooldown for gesture shooting
+            }
+        });
     }
     
     startGame() {
