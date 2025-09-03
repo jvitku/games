@@ -674,24 +674,20 @@ class HockeyIceAdventure {
         });
         
         this.socket.on('object-position', (data) => {
-            console.log('Game received object position:', data, 'Game state:', this.gameState);
             this.objectPosition = data;
             // Always update player position, regardless of game state
-            console.log('Updating player position');
             this.updatePlayerFromObject(data);
         });
     }
     
     updatePlayerFromObject(objectPos) {
-        console.log('updatePlayerFromObject called with:', objectPos, 'Player exists:', !!this.player);
         if (!this.player) {
-            console.log('Player object not found!');
             return;
         }
         
         // Map object position to full icy road (natural control)
-        // Fix mirroring: invert X coordinate since tracking shows mirrored view
-        this.targetPosition.x = (0.5 - objectPos.x) * 50; // Wider road: -25 to +25
+        // Direct mapping: objectPos.x directly controls player X position
+        this.targetPosition.x = (objectPos.x - 0.5) * 50; // Wider road: -25 to +25
         this.targetPosition.y = 0;
         this.targetPosition.z = (objectPos.y - 0.5) * 120; // Extended road: -60 to +60
         
@@ -699,8 +695,7 @@ class HockeyIceAdventure {
         this.targetPosition.x = Math.max(-25, Math.min(25, this.targetPosition.x));
         this.targetPosition.z = Math.max(-60, Math.min(60, this.targetPosition.z));
         
-        console.log('Updated target position:', this.targetPosition, 'from object pos:', objectPos);
-        console.log('Current player position:', this.player.position);
+        // Target position updated
     }
     
     updatePlayerMovement(delta, time) {

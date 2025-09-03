@@ -391,7 +391,6 @@ class GenericFeatureTracker {
                     // 1. OPTICAL FLOW TRACKING
                     try {
                         this.results.opticalFlow = mainTracker.performOpticalFlowTracking(this, frame, gray);
-                        console.log('Optical flow result:', !!this.results.opticalFlow);
                     } catch (error) {
                         console.error('Optical flow tracking failed:', error);
                         this.results.opticalFlow = null;
@@ -400,7 +399,6 @@ class GenericFeatureTracker {
                     // 2. TEMPLATE MATCHING
                     try {
                         this.results.templateMatching = mainTracker.performTemplateMatching(this, gray);
-                        console.log('Template matching result:', !!this.results.templateMatching);
                     } catch (error) {
                         console.error('Template matching failed:', error);
                         this.results.templateMatching = null;
@@ -409,7 +407,6 @@ class GenericFeatureTracker {
                     // 3. COLOR-BASED TRACKING
                     try {
                         this.results.colorTracking = mainTracker.performColorTracking(this, frame);
-                        console.log('Color tracking result:', !!this.results.colorTracking);
                     } catch (error) {
                         console.error('Color tracking failed:', error);
                         this.results.colorTracking = null;
@@ -565,15 +562,8 @@ class GenericFeatureTracker {
     }
     
     performOpenCVTracking() {
-        console.log('=== PERFORM OPENCV TRACKING ===', {
-            trackingInitialized: this.trackingInitialized,
-            isOpenCVReady: this.isOpenCVReady,
-            trackersLength: this.trackers.length,
-            trackingQuality: this.trackingQuality
-        });
         
         if (!this.trackingInitialized || !this.isOpenCVReady || this.trackers.length === 0) {
-            console.log('Tracking requirements not met, returning');
             return;
         }
         
@@ -626,12 +616,7 @@ class GenericFeatureTracker {
                     y: centerY / this.height
                 };
                 
-                console.log('OpenCV Tracking Position:', {
-                    rect: bestRect,
-                    center: { x: centerX, y: centerY },
-                    normalized: position,
-                    algorithm: bestTracker.algorithm
-                });
+                // OpenCV tracking position updated
                 
                 this.applyPositionWithSmoothing(position);
                 this.trackingQuality = Math.round(bestConfidence * 100);
@@ -743,12 +728,10 @@ class GenericFeatureTracker {
             });
             
             this.trackers.forEach(trackerObj => {
-                if (trackerObj.tracker) {
+                if (trackerObj.tracker && typeof trackerObj.tracker.delete === 'function') {
                     trackerObj.tracker.delete();
                 }
-                if (trackerObj.rect) {
-                    trackerObj.rect.delete();
-                }
+                // trackerObj.rect is a plain JS object, not an OpenCV Mat - no need to delete
             });
             this.trackers = [];
             
@@ -1021,14 +1004,7 @@ class GenericFeatureTracker {
         const results = tracker.results;
         const weights = tracker.confidenceWeights;
         
-        console.log('Fusion Debug:', {
-            opticalFlow: !!results.opticalFlow,
-            templateMatching: !!results.templateMatching,
-            colorTracking: !!results.colorTracking,
-            ofConf: results.opticalFlow?.confidence,
-            tmConf: results.templateMatching?.confidence,
-            ctConf: results.colorTracking?.confidence
-        });
+        // Debug fusion results (removed verbose logging)
         
         // Filter valid results
         const validResults = [];
@@ -1036,29 +1012,29 @@ class GenericFeatureTracker {
         if (results.templateMatching) validResults.push({...results.templateMatching, type: 'templateMatching'});
         if (results.colorTracking) validResults.push({...results.colorTracking, type: 'colorTracking'});
         
-        console.log('Valid tracking results:', validResults.length);
         if (validResults.length === 0) return null;
         
-        // Weighted average of positions
+        // Weighted average of positions only (keep original size to prevent expansion)
         let totalWeight = 0;
-        let weightedX = 0, weightedY = 0, weightedW = 0, weightedH = 0;
+        let weightedX = 0, weightedY = 0;
         
         validResults.forEach(result => {
             const weight = weights[result.type] * result.confidence;
             totalWeight += weight;
             weightedX += result.x * weight;
             weightedY += result.y * weight;
-            weightedW += result.width * weight;
-            weightedH += result.height * weight;
         });
         
         if (totalWeight === 0) return null;
         
+        // Use the original bounding box size to prevent expansion
+        const originalSize = tracker.boundingBox || validResults[0];
+        
         return {
             x: Math.max(0, Math.round(weightedX / totalWeight)),
             y: Math.max(0, Math.round(weightedY / totalWeight)),
-            width: Math.round(weightedW / totalWeight),
-            height: Math.round(weightedH / totalWeight),
+            width: originalSize.width,
+            height: originalSize.height,
             confidence: totalWeight / validResults.length,
             activeTrackers: validResults.map(r => r.type)
         };
@@ -1070,13 +1046,36 @@ class GenericFeatureTracker {
             // Use passed tracker object or fall back to class property
             const tracker = trackerObject || this.customTracker;
             
-            // Update optical flow points if available
+            // Update optical flow points if available, or regenerate if needed
             if (tracker.results.opticalFlow && tracker.results.opticalFlow.goodPoints) {
-                tracker.opticalFlowPoints.delete();
-                tracker.opticalFlowPoints = cv.matFromArray(
-                    tracker.results.opticalFlow.goodPoints.length, 1, cv.CV_32FC2,
-                    tracker.results.opticalFlow.goodPoints.flat()
-                );
+                const goodPointsCount = tracker.results.opticalFlow.goodPoints.length;
+                const originalPointsCount = tracker.opticalFlowPoints.rows;
+                
+                // Regenerate points if we've lost too many (less than 30% remaining)
+                if (goodPointsCount < originalPointsCount * 0.3) {
+                    console.log('Regenerating optical flow points: ', goodPointsCount, 'remaining of', originalPointsCount);
+                    
+                    // Generate new points within the current bounding box
+                    const points = [];
+                    const stepX = Math.max(4, Math.floor(result.width / 12));
+                    const stepY = Math.max(4, Math.floor(result.height / 12));
+                    
+                    for (let y = result.y + stepY; y < result.y + result.height - stepY; y += stepY) {
+                        for (let x = result.x + stepX; x < result.x + result.width - stepX; x += stepX) {
+                            points.push([x, y]);
+                        }
+                    }
+                    
+                    tracker.opticalFlowPoints.delete();
+                    tracker.opticalFlowPoints = cv.matFromArray(points.length, 1, cv.CV_32FC2, points.flat());
+                } else {
+                    // Use the good points from tracking
+                    tracker.opticalFlowPoints.delete();
+                    tracker.opticalFlowPoints = cv.matFromArray(
+                        goodPointsCount, 1, cv.CV_32FC2,
+                        tracker.results.opticalFlow.goodPoints.flat()
+                    );
+                }
             }
             
             // Update template if template matching confidence is high
@@ -1214,13 +1213,9 @@ class GenericFeatureTracker {
     trackingLoop() {
         if (!this.isTracking) return;
         
-        // Debug: Log first few frames and then every 60 frames
+        // Initialize frame counter for occasional debugging
         if (!this.frameCount) this.frameCount = 0;
         this.frameCount++;
-        if (this.frameCount <= 10 || this.frameCount % 60 === 0) {
-            console.log('Tracking loop frame:', this.frameCount, 'video ready state:', this.video.readyState, 
-                       'HAVE_ENOUGH_DATA:', this.video.HAVE_ENOUGH_DATA);
-        }
         
         try {
             // Clear canvas first
@@ -1253,21 +1248,11 @@ class GenericFeatureTracker {
             const shouldRunDetection = currentTime - this.lastDetectionTime >= this.detectionInterval;
             
             // Only perform tracking if calibrated and not in calibration mode
-            if (this.isCalibrated && !this.calibrationMode) {
-                console.log('=== TRACKING FRAME ===', {
-                    isCalibrated: this.isCalibrated,
-                    calibrationMode: this.calibrationMode,
-                    useOpenCVTracking: this.useOpenCVTracking,
-                    trackingInitialized: this.trackingInitialized,
-                    trackersCount: this.trackers.length
-                });
-                
+            if (this.isCalibrated && !this.calibrationMode) {                
                 if (this.useOpenCVTracking && this.trackingInitialized) {
                     // Use OpenCV feature-based tracking
-                    console.log('Calling performOpenCVTracking...');
                     this.performOpenCVTracking();
                 } else if (this.targetColor) {
-                    console.log('Fallback: Tracking calibrated object with color tracking:', this.targetColor);
                     if (this.isOpenCVReady && typeof cv !== 'undefined') {
                         this.performObjectTracking();
                     } else {
@@ -1746,18 +1731,9 @@ class GenericFeatureTracker {
     }
     
     updateUI() {
-        try {
-            console.log('=== UPDATE UI ===', {
-                objectPosition: this.objectPosition,
-                trackingQuality: this.trackingQuality,
-                willSend: this.trackingQuality > 1
-            });
-            
+        try {            
             if (this.trackingQuality > 1) { // Temporarily lowered to debug tracking
-                console.log('Sending object position:', this.objectPosition, 'Quality:', this.trackingQuality);
                 this.socket.emit('object-position', this.objectPosition);
-            } else {
-                console.log('Not sending - quality too low:', this.trackingQuality);
             }
             
             document.getElementById('objectPos').textContent = 
