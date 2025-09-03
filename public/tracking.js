@@ -1,4 +1,4 @@
-class ImprovedMediaPipeTracker {
+class OpenCVBallTracker {
     constructor() {
         this.video = document.getElementById('webcam');
         this.trackingCanvas = document.getElementById('trackingCanvas');
@@ -7,8 +7,9 @@ class ImprovedMediaPipeTracker {
         
         this.trackingQuality = 0;
         this.isTracking = false;
-        this.isMediaPipeReady = false;
+        this.isOpenCVReady = false;
         this.isCalibrated = false;
+        this.calibrationMode = false;
         
         // High resolution for better tracking
         this.width = 640;
@@ -19,23 +20,22 @@ class ImprovedMediaPipeTracker {
         this.lastValidPosition = { x: 0.5, y: 0.5 };
         this.positionHistory = [];
         this.maxHistorySize = 5;
-        this.jumpThreshold = 0.15;
-        this.minObjectSize = 300; // Minimum area for object detection
+        this.jumpThreshold = 0.12; // Stricter jump detection
         
         // Color calibration for ball tracking
         this.targetColor = null;
-        this.colorTolerance = 40;
+        this.colorTolerance = { h: 15, s: 60, v: 60 }; // More selective
+        this.minContourArea = 500; // Higher minimum area to avoid noise
+        this.maxContourArea = 8000; // Reasonable maximum area
         
-        // MediaPipe instances
-        this.hands = null;
-        this.objectron = null;
-        this.camera = null;
-        
-        // Tracking modes
-        this.trackingMode = 'ball'; // 'hands' or 'ball'
+        // OpenCV matrices
+        this.src = null;
+        this.hsv = null;
+        this.mask = null;
+        this.contours = null;
+        this.hierarchy = null;
         
         this.initWebcam();
-        this.setupMediaPipe();
     }
     
     async initWebcam() {
@@ -53,7 +53,7 @@ class ImprovedMediaPipeTracker {
             
             this.video.addEventListener('loadeddata', () => {
                 console.log('Video loaded, dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
-                document.getElementById('status').textContent = 'High-res webcam ready, MediaPipe loading...';
+                document.getElementById('status').textContent = 'Webcam ready, waiting for OpenCV...';
                 this.startTracking();
             });
         } catch (error) {
@@ -62,262 +62,307 @@ class ImprovedMediaPipeTracker {
         }
     }
     
-    setupMediaPipe() {
-        // Setup Hand tracking
-        if (typeof Hands !== 'undefined') {
-            this.hands = new Hands({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-            });
-            
-            this.hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.8,
-                minTrackingConfidence: 0.8
-            });
-            
-            this.hands.onResults((results) => this.onHandResults(results));
-        }
-        
-        // Setup Object detection for balls
-        if (typeof Objectron !== 'undefined') {
-            this.objectron = new Objectron({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/objectron/${file}`
-            });
-            
-            this.objectron.setOptions({
-                modelName: 'Cup',
-                maxNumObjects: 1,
-                minDetectionConfidence: 0.6
-            });
-            
-            this.objectron.onResults((results) => this.onObjectResults(results));
-        }
-        
-        setTimeout(() => {
-            this.isMediaPipeReady = true;
-            document.getElementById('status').textContent = 'MediaPipe ready! Choose tracking mode and calibrate.';
-        }, 3000);
+    onOpenCVReady() {
+        this.isOpenCVReady = true;
+        this.initializeOpenCVMatrices();
+        document.getElementById('status').textContent = 'OpenCV ready! Click Calibrate to start ball tracking.';
     }
     
-    onHandResults(results) {
-        // Clear and draw video (mirrored)
-        this.trackingCtx.save();
-        this.trackingCtx.scale(-1, 1);
-        this.trackingCtx.drawImage(results.image, -this.width, 0, this.width, this.height);
-        this.trackingCtx.restore();
-        
-        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-            const hand = results.multiHandLandmarks[0];
-            
-            // Use index finger tip for precise control
-            const indexTip = hand[8];
-            
-            // Mirror the X coordinate
-            const position = {
-                x: 1 - indexTip.x, // Mirror horizontally
-                y: indexTip.y
-            };
-            
-            this.applyPositionWithSmoothing(position);
-            this.trackingQuality = 95;
-            
-            // Draw hand landmarks (mirrored)
-            this.drawHandLandmarks(hand, true);
-            
-            // Draw tracking indicator
-            this.drawTrackingIndicator(position, '#00FF00', 25);
-            
-        } else {
-            this.trackingQuality = 0;
+    initializeOpenCVMatrices() {
+        try {
+            // Initialize OpenCV matrices for processing
+            this.src = new cv.Mat(this.height, this.width, cv.CV_8UC4);
+            this.hsv = new cv.Mat(this.height, this.width, cv.CV_8UC3);
+            this.mask = new cv.Mat(this.height, this.width, cv.CV_8UC1);
+            this.contours = new cv.MatVector();
+            this.hierarchy = new cv.Mat();
+        } catch (error) {
+            console.error('Error initializing OpenCV matrices:', error);
         }
-        
-        this.updateUI();
     }
     
-    onObjectResults(results) {
-        // Clear and draw video (mirrored)
-        this.trackingCtx.save();
-        this.trackingCtx.scale(-1, 1);
-        this.trackingCtx.drawImage(results.image, -this.width, 0, this.width, this.height);
-        this.trackingCtx.restore();
-        
-        if (results.detectedObjects && results.detectedObjects.length > 0) {
-            const object = results.detectedObjects[0];
-            
-            // Calculate center of detected object
-            let centerX = 0, centerY = 0;
-            object.landmarks2d.forEach(point => {
-                centerX += point.x;
-                centerY += point.y;
-            });
-            
-            const position = {
-                x: 1 - (centerX / object.landmarks2d.length), // Mirror horizontally
-                y: centerY / object.landmarks2d.length
-            };
-            
-            this.applyPositionWithSmoothing(position);
-            this.trackingQuality = 80;
-            
-            // Draw object detection (mirrored)
-            this.drawObjectDetection(object, true);
-            
-            // Draw tracking indicator
-            this.drawTrackingIndicator(position, '#FF6B6B', 30);
-            
-        } else {
-            this.trackingQuality = 0;
-            // Fallback to color-based tracking
-            this.fallbackColorTracking();
-        }
-        
-        this.updateUI();
+    startTracking() {
+        this.isTracking = true;
+        this.trackingLoop();
     }
     
-    fallbackColorTracking() {
-        if (!this.isCalibrated || !this.targetColor) return;
+    trackingLoop() {
+        if (!this.isTracking) return;
         
-        const imageData = this.trackingCtx.getImageData(0, 0, this.width, this.height);
-        const data = imageData.data;
-        
-        let bestMatch = { x: this.width/2, y: this.height/2, score: -1, area: 0 };
-        const step = 4;
-        const regionSize = 8; // Size of region to analyze around each point
-        
-        for (let y = regionSize; y < this.height - regionSize; y += step) {
-            for (let x = regionSize; x < this.width - regionSize; x += step) {
-                const colorScore = this.getRegionColorScore(data, x, y, regionSize);
-                const objectScore = this.getObjectScore(data, x, y, regionSize);
-                const totalScore = colorScore * 0.7 + objectScore * 0.3;
+        try {
+            // Always draw video frame first
+            if (this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
+                this.trackingCtx.save();
+                this.trackingCtx.scale(-1, 1);
+                this.trackingCtx.drawImage(this.video, -this.width, 0, this.width, this.height);
+                this.trackingCtx.restore();
                 
-                if (totalScore > bestMatch.score && totalScore > 0.5) {
-                    const area = this.estimateObjectArea(data, x, y);
-                    if (area > this.minObjectSize) {
-                        bestMatch = { x, y, score: totalScore, area };
+                // Perform ball tracking if calibrated
+                if (this.isCalibrated && this.targetColor) {
+                    if (this.isOpenCVReady && typeof cv !== 'undefined') {
+                        this.performBallTracking();
+                    } else {
+                        // Simple fallback color tracking without OpenCV
+                        this.performSimpleColorTracking();
                     }
                 }
             }
+            
+            // Draw calibration overlay if in calibration mode
+            if (this.calibrationMode) {
+                this.drawCalibrationOverlay();
+            }
+            
+            // Update UI
+            this.updateUI();
+            
+        } catch (error) {
+            console.error('Tracking loop error:', error);
         }
         
-        if (bestMatch.score > 0.5) {
-            const position = {
-                x: 1 - (bestMatch.x / this.width), // Mirror horizontally
-                y: bestMatch.y / this.height
-            };
+        requestAnimationFrame(() => this.trackingLoop());
+    }
+    
+    performBallTracking() {
+        try {
+            // Get image data from canvas (after video is drawn)
+            const imageData = this.trackingCtx.getImageData(0, 0, this.width, this.height);
             
-            this.applyPositionWithSmoothing(position);
-            this.trackingQuality = bestMatch.score * 80;
+            // Convert to OpenCV mat
+            this.src.data.set(imageData.data);
             
-            // Draw tracking visualization
-            this.drawBallTracking(bestMatch.x, bestMatch.y, bestMatch.area);
-        } else {
+            // Convert RGBA to HSV
+            let rgb = new cv.Mat();
+            cv.cvtColor(this.src, rgb, cv.COLOR_RGBA2RGB);
+            cv.cvtColor(rgb, this.hsv, cv.COLOR_RGB2HSV);
+            
+            // Create scalar values for color range
+            const lowerBound = new cv.Scalar(
+                Math.max(0, this.targetColor.h - this.colorTolerance.h),
+                Math.max(0, this.targetColor.s - this.colorTolerance.s),
+                Math.max(0, this.targetColor.v - this.colorTolerance.v)
+            );
+            
+            const upperBound = new cv.Scalar(
+                Math.min(179, this.targetColor.h + this.colorTolerance.h),
+                Math.min(255, this.targetColor.s + this.colorTolerance.s),
+                Math.min(255, this.targetColor.v + this.colorTolerance.v)
+            );
+            
+            // Create mask for target color
+            cv.inRange(this.hsv, lowerBound, upperBound, this.mask);
+            
+            // Morphological operations to clean up the mask
+            const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(9, 9));
+            cv.morphologyEx(this.mask, this.mask, cv.MORPH_OPEN, kernel);
+            cv.morphologyEx(this.mask, this.mask, cv.MORPH_CLOSE, kernel);
+            
+            // Find contours
+            cv.findContours(this.mask, this.contours, this.hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            
+            // Find the best contour (largest within size constraints)
+            let bestContour = null;
+            let maxArea = 0;
+            let bestCenter = null;
+            
+            for (let i = 0; i < this.contours.size(); i++) {
+                const contour = this.contours.get(i);
+                const area = cv.contourArea(contour);
+                
+                if (area > this.minContourArea && area < this.maxContourArea && area > maxArea) {
+                    maxArea = area;
+                    bestContour = contour;
+                }
+            }
+            
+            if (bestContour && maxArea > 0) {
+                // Get moments to find centroid
+                const moments = cv.moments(bestContour);
+                if (moments.m00 > 0) {
+                    const centerX = moments.m10 / moments.m00;
+                    const centerY = moments.m01 / moments.m00;
+                    bestCenter = {x: centerX, y: centerY};
+                    
+                    const position = {
+                        x: centerX / this.width, // Don't mirror - video is already mirrored
+                        y: centerY / this.height
+                    };
+                    
+                    this.applyPositionWithSmoothing(position);
+                    this.trackingQuality = Math.min(95, (maxArea / 50) * 10);
+                    
+                    // Draw tracking visualization 
+                    this.drawBallTracking(centerX, centerY, maxArea);
+                }
+            } else {
+                this.trackingQuality = Math.max(0, this.trackingQuality - 5);
+            }
+            
+            // Cleanup temporary matrices
+            rgb.delete();
+            kernel.delete();
+            
+        } catch (error) {
+            console.error('Ball tracking error:', error);
             this.trackingQuality = Math.max(0, this.trackingQuality - 10);
         }
     }
     
-    getRegionColorScore(data, centerX, centerY, regionSize) {
-        if (!this.targetColor) return 0;
-        
-        let totalScore = 0;
-        let pixelCount = 0;
-        
-        for (let dy = -regionSize; dy <= regionSize; dy += 2) {
-            for (let dx = -regionSize; dx <= regionSize; dx += 2) {
-                const x = centerX + dx;
-                const y = centerY + dy;
-                
-                if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
+    performSimpleColorTracking() {
+        try {
+            const imageData = this.trackingCtx.getImageData(0, 0, this.width, this.height);
+            const data = imageData.data;
+            
+            // Convert target HSV back to RGB for comparison
+            const targetRGB = this.hsvToRgb(this.targetColor.h * 2, this.targetColor.s / 255, this.targetColor.v / 255);
+            
+            let clusters = [];
+            const step = 8; // Larger step for performance during debugging
+            const tolerance = 50; // More tolerant for initial testing
+            const minClusterSize = 15; // Lower requirement for easier detection
+            
+            console.log('Target RGB for tracking:', targetRGB);
+            
+            // Find all matching pixels
+            for (let y = 0; y < this.height; y += step) {
+                for (let x = 0; x < this.width; x += step) {
                     const index = (y * this.width + x) * 4;
                     const r = data[index];
                     const g = data[index + 1];
                     const b = data[index + 2];
                     
-                    const hsv = this.rgbToHsv(r, g, b);
-                    const colorScore = this.getColorScore(hsv);
+                    // Calculate Euclidean color distance (more accurate than Manhattan)
+                    const colorDist = Math.sqrt(
+                        Math.pow(r - targetRGB.r, 2) + 
+                        Math.pow(g - targetRGB.g, 2) + 
+                        Math.pow(b - targetRGB.b, 2)
+                    );
                     
-                    totalScore += colorScore;
-                    pixelCount++;
+                    if (colorDist < tolerance) {
+                        // Count nearby matching pixels in circular area
+                        let nearbyMatches = 0;
+                        const searchRadius = 20;
+                        
+                        for (let dy = -searchRadius; dy <= searchRadius; dy += step) {
+                            for (let dx = -searchRadius; dx <= searchRadius; dx += step) {
+                                // Check if pixel is within circular radius
+                                if (dx*dx + dy*dy <= searchRadius*searchRadius) {
+                                    const nx = x + dx;
+                                    const ny = y + dy;
+                                    if (nx >= 0 && nx < this.width && ny >= 0 && ny < this.height) {
+                                        const nindex = (ny * this.width + nx) * 4;
+                                        const nr = data[nindex];
+                                        const ng = data[nindex + 1];
+                                        const nb = data[nindex + 2];
+                                        
+                                        const nColorDist = Math.sqrt(
+                                            Math.pow(nr - targetRGB.r, 2) + 
+                                            Math.pow(ng - targetRGB.g, 2) + 
+                                            Math.pow(nb - targetRGB.b, 2)
+                                        );
+                                        if (nColorDist < tolerance) nearbyMatches++;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (nearbyMatches >= minClusterSize) {
+                            clusters.push({
+                                x: x,
+                                y: y,
+                                density: nearbyMatches,
+                                score: (tolerance - colorDist) / tolerance
+                            });
+                        }
+                    }
                 }
             }
-        }
-        
-        return pixelCount > 0 ? totalScore / pixelCount : 0;
-    }
-    
-    getObjectScore(data, centerX, centerY, regionSize) {
-        // Check for round/circular patterns
-        let edgeScore = 0;
-        let consistencyScore = 0;
-        let checkCount = 0;
-        
-        const centerIndex = (centerY * this.width + centerX) * 4;
-        const centerR = data[centerIndex];
-        const centerG = data[centerIndex + 1];
-        const centerB = data[centerIndex + 2];
-        
-        // Check circular pattern
-        for (let angle = 0; angle < 360; angle += 45) {
-            const rad = (angle * Math.PI) / 180;
-            const x = Math.round(centerX + Math.cos(rad) * regionSize);
-            const y = Math.round(centerY + Math.sin(rad) * regionSize);
             
-            if (x >= 0 && x < this.width && y >= 0 && y < this.height) {
-                const index = (y * this.width + x) * 4;
-                const r = data[index];
-                const g = data[index + 1];
-                const b = data[index + 2];
+            // Find the best cluster, prioritizing proximity to last known position
+            if (clusters.length > 0) {
+                let bestCluster;
                 
-                // Color consistency with center
-                const colorDiff = Math.abs(r - centerR) + Math.abs(g - centerG) + Math.abs(b - centerB);
-                if (colorDiff < 80) consistencyScore++;
-                
-                checkCount++;
-            }
-        }
-        
-        return checkCount > 0 ? consistencyScore / checkCount : 0;
-    }
-    
-    estimateObjectArea(data, centerX, centerY) {
-        // Flood fill to estimate object size
-        const visited = new Set();
-        const toCheck = [{x: centerX, y: centerY}];
-        const centerIndex = (centerY * this.width + centerX) * 4;
-        const targetR = data[centerIndex];
-        const targetG = data[centerIndex + 1];
-        const targetB = data[centerIndex + 2];
-        const tolerance = 60;
-        let area = 0;
-        const maxArea = 2000; // Prevent infinite loops
-        
-        while (toCheck.length > 0 && area < maxArea) {
-            const {x, y} = toCheck.pop();
-            const key = `${x},${y}`;
-            
-            if (visited.has(key) || x < 0 || x >= this.width || y < 0 || y >= this.height) {
-                continue;
-            }
-            
-            const index = (y * this.width + x) * 4;
-            const r = data[index];
-            const g = data[index + 1];
-            const b = data[index + 2];
-            
-            const colorDiff = Math.abs(r - targetR) + Math.abs(g - targetG) + Math.abs(b - targetB);
-            
-            if (colorDiff < tolerance) {
-                visited.add(key);
-                area++;
-                
-                // Add neighbors (limited to prevent performance issues)
-                if (area < maxArea) {
-                    toCheck.push({x: x+2, y}, {x: x-2, y}, {x, y: y+2}, {x, y: y-2});
+                if (this.trackingQuality > 0) {
+                    // If we have a previous position, prefer nearby clusters
+                    const lastX = this.lastValidPosition.x * this.width;
+                    const lastY = this.lastValidPosition.y * this.height;
+                    
+                    bestCluster = clusters.reduce((prev, current) => {
+                        const prevDist = Math.sqrt(Math.pow(prev.x - lastX, 2) + Math.pow(prev.y - lastY, 2));
+                        const currDist = Math.sqrt(Math.pow(current.x - lastX, 2) + Math.pow(current.y - lastY, 2));
+                        
+                        // Combine density score with proximity score (closer is better)
+                        const prevScore = prev.density - (prevDist * 0.1);
+                        const currScore = current.density - (currDist * 0.1);
+                        
+                        return currScore > prevScore ? current : prev;
+                    });
+                    
+                    // Reject if the best cluster is too far from last position
+                    const distToLast = Math.sqrt(
+                        Math.pow(bestCluster.x - lastX, 2) + Math.pow(bestCluster.y - lastY, 2)
+                    );
+                    
+                    if (distToLast > 100) { // Max pixel distance for continuity
+                        console.log('Best cluster too far from last position, rejecting');
+                        this.trackingQuality = Math.max(0, this.trackingQuality - 15);
+                        return;
+                    }
+                } else {
+                    // No previous position, just use highest density
+                    bestCluster = clusters.reduce((prev, current) => 
+                        (current.density > prev.density) ? current : prev
+                    );
                 }
+                
+                console.log('Best cluster found:', bestCluster);
+                
+                const position = {
+                    x: bestCluster.x / this.width, // Don't mirror - video is already mirrored
+                    y: bestCluster.y / this.height
+                };
+                
+                this.applyPositionWithSmoothing(position);
+                this.trackingQuality = Math.min(95, (bestCluster.density / minClusterSize) * 30);
+                
+                // Draw tracking visualization 
+                this.drawBallTracking(bestCluster.x, bestCluster.y, bestCluster.density * 15);
+            } else {
+                this.trackingQuality = Math.max(0, this.trackingQuality - 8);
+                console.log('No valid clusters found');
             }
+            
+        } catch (error) {
+            console.error('Simple color tracking error:', error);
+            this.trackingQuality = Math.max(0, this.trackingQuality - 10);
+        }
+    }
+    
+    hsvToRgb(h, s, v) {
+        const c = v * s;
+        const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+        const m = v - c;
+        
+        let r, g, b;
+        if (h >= 0 && h < 60) {
+            r = c; g = x; b = 0;
+        } else if (h >= 60 && h < 120) {
+            r = x; g = c; b = 0;
+        } else if (h >= 120 && h < 180) {
+            r = 0; g = c; b = x;
+        } else if (h >= 180 && h < 240) {
+            r = 0; g = x; b = c;
+        } else if (h >= 240 && h < 300) {
+            r = x; g = 0; b = c;
+        } else {
+            r = c; g = 0; b = x;
         }
         
-        return area * 4; // Approximate actual area
+        return {
+            r: Math.round((r + m) * 255),
+            g: Math.round((g + m) * 255),
+            b: Math.round((b + m) * 255)
+        };
     }
     
     applyPositionWithSmoothing(newPosition) {
@@ -343,7 +388,7 @@ class ImprovedMediaPipeTracker {
         // Calculate weighted average
         let totalX = 0, totalY = 0, totalWeight = 0;
         this.positionHistory.forEach((pos, index) => {
-            const weight = Math.pow(1.8, index); // Strong weighting toward recent positions
+            const weight = Math.pow(1.8, index);
             totalX += pos.x * weight;
             totalY += pos.y * weight;
             totalWeight += weight;
@@ -354,91 +399,153 @@ class ImprovedMediaPipeTracker {
         this.lastValidPosition = { ...this.ballPosition };
     }
     
-    drawHandLandmarks(landmarks, mirrored = false) {
-        this.trackingCtx.fillStyle = '#FF0000';
-        this.trackingCtx.strokeStyle = '#00FF00';
-        this.trackingCtx.lineWidth = 2;
-        
-        // Draw landmarks
-        landmarks.forEach(landmark => {
-            const x = mirrored ? (1 - landmark.x) * this.width : landmark.x * this.width;
-            const y = landmark.y * this.height;
+    drawBallTracking(x, y, area) {
+        try {
+            // Make tracking marker much more visible
+            const size = Math.max(30, Math.min(80, Math.sqrt(area) / 3));
             
+            // Draw thick bright circle
+            this.trackingCtx.strokeStyle = '#00FF00';
+            this.trackingCtx.lineWidth = 4;
             this.trackingCtx.beginPath();
-            this.trackingCtx.arc(x, y, 3, 0, 2 * Math.PI);
-            this.trackingCtx.fill();
-        });
-        
-        // Highlight index finger tip
-        const indexTip = landmarks[8];
-        const x = mirrored ? (1 - indexTip.x) * this.width : indexTip.x * this.width;
-        const y = indexTip.y * this.height;
-        
-        this.trackingCtx.strokeStyle = '#FFFF00';
-        this.trackingCtx.lineWidth = 4;
-        this.trackingCtx.beginPath();
-        this.trackingCtx.arc(x, y, 12, 0, 2 * Math.PI);
-        this.trackingCtx.stroke();
-    }
-    
-    drawObjectDetection(object, mirrored = false) {
-        this.trackingCtx.strokeStyle = '#FFD700';
-        this.trackingCtx.lineWidth = 2;
-        
-        if (object.landmarks2d && object.landmarks2d.length > 0) {
-            this.trackingCtx.beginPath();
-            object.landmarks2d.forEach((point, index) => {
-                const x = mirrored ? (1 - point.x) * this.width : point.x * this.width;
-                const y = point.y * this.height;
-                
-                if (index === 0) {
-                    this.trackingCtx.moveTo(x, y);
-                } else {
-                    this.trackingCtx.lineTo(x, y);
-                }
-                
-                // Draw corner points
-                this.trackingCtx.fillStyle = '#FFD700';
-                this.trackingCtx.fillRect(x - 3, y - 3, 6, 6);
-            });
-            this.trackingCtx.closePath();
+            this.trackingCtx.arc(x, y, size, 0, 2 * Math.PI);
             this.trackingCtx.stroke();
+            
+            // Draw center dot
+            this.trackingCtx.fillStyle = '#00FF00';
+            this.trackingCtx.beginPath();
+            this.trackingCtx.arc(x, y, 5, 0, 2 * Math.PI);
+            this.trackingCtx.fill();
+            
+            // Draw crosshair
+            this.trackingCtx.strokeStyle = '#FFFF00';
+            this.trackingCtx.lineWidth = 2;
+            this.trackingCtx.beginPath();
+            this.trackingCtx.moveTo(x - size/2, y);
+            this.trackingCtx.lineTo(x + size/2, y);
+            this.trackingCtx.moveTo(x, y - size/2);
+            this.trackingCtx.lineTo(x, y + size/2);
+            this.trackingCtx.stroke();
+            
+            // Show area and position info
+            this.trackingCtx.fillStyle = '#FFFFFF';
+            this.trackingCtx.font = 'bold 14px Arial';
+            this.trackingCtx.strokeStyle = '#000000';
+            this.trackingCtx.lineWidth = 3;
+            this.trackingCtx.strokeText(`TRACKING: ${Math.round(area)}px`, x + 40, y - 30);
+            this.trackingCtx.fillText(`TRACKING: ${Math.round(area)}px`, x + 40, y - 30);
+        } catch (error) {
+            console.error('Ball tracking draw error:', error);
         }
     }
     
-    drawTrackingIndicator(position, color, size) {
-        const centerX = position.x * this.width;
-        const centerY = position.y * this.height;
-        
-        this.trackingCtx.strokeStyle = color;
-        this.trackingCtx.lineWidth = 3;
-        this.trackingCtx.strokeRect(centerX - size, centerY - size, size * 2, size * 2);
-        
-        this.trackingCtx.fillStyle = color;
-        this.trackingCtx.fillRect(centerX - 4, centerY - 4, 8, 8);
-        
-        // Draw crosshair
-        this.trackingCtx.beginPath();
-        this.trackingCtx.moveTo(centerX - size/2, centerY);
-        this.trackingCtx.lineTo(centerX + size/2, centerY);
-        this.trackingCtx.moveTo(centerX, centerY - size/2);
-        this.trackingCtx.lineTo(centerX, centerY + size/2);
-        this.trackingCtx.stroke();
+    drawCalibrationOverlay() {
+        try {
+            // Semi-transparent overlay
+            this.trackingCtx.fillStyle = 'rgba(255, 255, 0, 0.1)';
+            this.trackingCtx.fillRect(0, 0, this.width, this.height);
+            
+            // Pulsing border
+            const time = Date.now() * 0.005;
+            const intensity = (Math.sin(time) + 1) * 0.5;
+            this.trackingCtx.strokeStyle = `rgba(255, 255, 0, ${0.3 + intensity * 0.4})`;
+            this.trackingCtx.lineWidth = 8;
+            this.trackingCtx.strokeRect(4, 4, this.width - 8, this.height - 8);
+            
+            // Calibration text
+            this.trackingCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            this.trackingCtx.fillRect(this.width/2 - 150, 20, 300, 60);
+            this.trackingCtx.fillStyle = '#FFFF00';
+            this.trackingCtx.font = 'bold 18px Arial';
+            this.trackingCtx.textAlign = 'center';
+            this.trackingCtx.fillText('CALIBRATION MODE', this.width/2, 45);
+            this.trackingCtx.font = '14px Arial';
+            this.trackingCtx.fillText('Click on the ball to calibrate', this.width/2, 65);
+            this.trackingCtx.textAlign = 'left';
+        } catch (error) {
+            console.error('Calibration overlay draw error:', error);
+        }
     }
     
-    drawBallTracking(x, y, area) {
-        this.trackingCtx.strokeStyle = '#00FFFF';
-        this.trackingCtx.lineWidth = 3;
-        const size = Math.max(20, Math.min(50, Math.sqrt(area) / 5));
-        this.trackingCtx.strokeRect(x - size, y - size, size * 2, size * 2);
+    updateUI() {
+        try {
+            if (this.trackingQuality > 30) {
+                this.socket.emit('ball-position', this.ballPosition);
+            }
+            
+            document.getElementById('ballPos').textContent = 
+                `X: ${(this.ballPosition.x * 100).toFixed(1)}%, Y: ${(this.ballPosition.y * 100).toFixed(1)}%`;
+            document.getElementById('trackingQuality').textContent = `${this.trackingQuality.toFixed(0)}%`;
+        } catch (error) {
+            console.error('UI update error:', error);
+        }
+    }
+    
+    calibrate() {
+        this.positionHistory = [];
+        this.ballPosition = { x: 0.5, y: 0.5 };
+        this.lastValidPosition = { x: 0.5, y: 0.5 };
         
-        this.trackingCtx.fillStyle = '#00FFFF';
-        this.trackingCtx.fillRect(x - 3, y - 3, 6, 6);
+        this.calibrationMode = true;
+        document.getElementById('status').textContent = 
+            'CALIBRATION MODE: Click on the ball in the video to start tracking';
+    }
+    
+    calibrateBallColor(x, y) {
+        console.log('=== CALIBRATION DEBUG ===');
+        console.log('Click coordinates:', x, y);
+        console.log('Canvas dimensions:', this.width, this.height);
+        console.log('Calibration mode:', this.calibrationMode);
         
-        // Show area
-        this.trackingCtx.fillStyle = '#FFFFFF';
-        this.trackingCtx.font = '12px Arial';
-        this.trackingCtx.fillText(`${Math.round(area)}px`, x + 25, y - 25);
+        try {
+            // Use coordinates directly since video is already mirrored
+            console.log('Using X coordinate directly:', x);
+            
+            // Simple single pixel sample first for debugging
+            const singlePixelData = this.trackingCtx.getImageData(x, y, 1, 1);
+            const singlePixel = singlePixelData.data;
+            console.log('Single pixel at click:', {
+                r: singlePixel[0],
+                g: singlePixel[1], 
+                b: singlePixel[2],
+                a: singlePixel[3]
+            });
+            
+            // If single pixel is valid, use it for calibration
+            if (singlePixel[0] !== undefined) {
+                const r = singlePixel[0];
+                const g = singlePixel[1];
+                const b = singlePixel[2];
+                
+                // Convert to HSV
+                const hsv = this.rgbToHsv(r, g, b);
+                console.log('Converted to HSV:', hsv);
+                
+                this.targetColor = hsv;
+                this.isCalibrated = true;
+                this.positionHistory = [];
+                this.trackingQuality = 0;
+                
+                document.getElementById('status').textContent = 
+                    `CALIBRATED! RGB(${r},${g},${b}) HSV(${Math.round(hsv.h)},${Math.round(hsv.s)},${Math.round(hsv.v)}) - Move ball to test`;
+                
+                console.log('=== CALIBRATION SUCCESS ===');
+                console.log('Target color set to:', this.targetColor);
+                
+                // Test the tracking immediately
+                setTimeout(() => {
+                    console.log('Testing tracking with calibrated color...');
+                }, 1000);
+                
+            } else {
+                throw new Error('Could not read pixel data at clicked position');
+            }
+            
+        } catch (error) {
+            console.error('=== CALIBRATION FAILED ===');
+            console.error('Error:', error);
+            document.getElementById('status').textContent = 'Calibration failed! Check console for details.';
+        }
     }
     
     rgbToHsv(r, g, b) {
@@ -462,126 +569,66 @@ class ImprovedMediaPipeTracker {
         const s = max === 0 ? 0 : diff / max;
         const v = max;
         
-        return { h: h / 2, s: s * 100, v: v * 100 };
+        return { h: h / 2, s: s * 255, v: v * 255 }; // OpenCV HSV ranges
     }
     
-    getColorScore(hsv) {
-        if (!this.targetColor) return 0;
-        
-        const hueDiff = Math.min(
-            Math.abs(hsv.h - this.targetColor.h),
-            360 - Math.abs(hsv.h - this.targetColor.h)
-        );
-        const satDiff = Math.abs(hsv.s - this.targetColor.s);
-        const valDiff = Math.abs(hsv.v - this.targetColor.v);
-        
-        const hueScore = Math.max(0, 1 - hueDiff / this.colorTolerance);
-        const satScore = Math.max(0, 1 - satDiff / 50);
-        const valScore = Math.max(0, 1 - valDiff / 50);
-        
-        return (hueScore * 0.6 + satScore * 0.2 + valScore * 0.2);
-    }
-    
-    startTracking() {
-        this.isTracking = true;
-        this.trackingLoop();
-    }
-    
-    trackingLoop() {
-        if (!this.isTracking) return;
-        
-        if (this.video.readyState === this.video.HAVE_ENOUGH_DATA && this.isMediaPipeReady) {
-            try {
-                if (this.trackingMode === 'hands' && this.hands) {
-                    this.hands.send({ image: this.video });
-                } else if (this.trackingMode === 'ball' && this.objectron) {
-                    this.objectron.send({ image: this.video });
-                }
-            } catch (error) {
-                console.error('MediaPipe error:', error);
-                this.fallbackColorTracking();
-            }
-        } else {
-            // Draw video while waiting for MediaPipe
-            this.trackingCtx.save();
-            this.trackingCtx.scale(-1, 1);
-            this.trackingCtx.drawImage(this.video, -this.width, 0, this.width, this.height);
-            this.trackingCtx.restore();
+    cleanup() {
+        try {
+            if (this.src) this.src.delete();
+            if (this.hsv) this.hsv.delete();
+            if (this.mask) this.mask.delete();
+            if (this.contours) this.contours.delete();
+            if (this.hierarchy) this.hierarchy.delete();
+        } catch (error) {
+            console.error('Cleanup error:', error);
         }
-        
-        requestAnimationFrame(() => this.trackingLoop());
-    }
-    
-    updateUI() {
-        if (this.trackingQuality > 30) {
-            this.socket.emit('ball-position', this.ballPosition);
-        }
-        
-        document.getElementById('ballPos').textContent = 
-            `X: ${(this.ballPosition.x * 100).toFixed(1)}%, Y: ${(this.ballPosition.y * 100).toFixed(1)}%`;
-        document.getElementById('trackingQuality').textContent = `${this.trackingQuality.toFixed(0)}%`;
-    }
-    
-    switchTrackingMode(mode) {
-        this.trackingMode = mode;
-        this.positionHistory = [];
-        document.getElementById('status').textContent = 
-            `Switched to ${mode === 'hands' ? 'hand' : 'ball'} tracking mode`;
-    }
-    
-    calibrateBallColor(x, y) {
-        // Adjust for mirrored display
-        const actualX = this.width - x;
-        const imageData = this.trackingCtx.getImageData(actualX, y, 1, 1);
-        const data = imageData.data;
-        const hsv = this.rgbToHsv(data[0], data[1], data[2]);
-        
-        this.targetColor = hsv;
-        this.isCalibrated = true;
-        this.positionHistory = [];
-        
-        document.getElementById('status').textContent = 
-            `Ball calibrated! H:${Math.round(hsv.h)} S:${Math.round(hsv.s)} V:${Math.round(hsv.v)}`;
-    }
-    
-    calibrate() {
-        this.positionHistory = [];
-        this.ballPosition = { x: 0.5, y: 0.5 };
-        this.lastValidPosition = { x: 0.5, y: 0.5 };
-        document.getElementById('status').textContent = 
-            `Ready to calibrate! Click on object to track (${this.trackingMode} mode)`;
     }
 }
 
 let tracker;
 
+// Global function for OpenCV ready callback
+function onOpenCvReady() {
+    console.log('OpenCV.js is ready');
+    if (tracker) {
+        tracker.onOpenCVReady();
+    }
+}
+
 window.addEventListener('load', () => {
-    tracker = new ImprovedMediaPipeTracker();
+    tracker = new OpenCVBallTracker();
     
     document.getElementById('calibrateBtn').addEventListener('click', () => {
+        console.log('=== CALIBRATE BUTTON CLICKED ===');
         tracker.calibrate();
+        console.log('Calibration mode should now be:', tracker.calibrationMode);
     });
     
     document.getElementById('trackingCanvas').addEventListener('click', (e) => {
+        console.log('=== CANVAS CLICK DETECTED ===');
         const rect = e.target.getBoundingClientRect();
         const x = (e.clientX - rect.left) * (640 / rect.width);
         const y = (e.clientY - rect.top) * (480 / rect.height);
         
-        if (tracker.trackingMode === 'ball') {
+        console.log('Raw click coords:', e.clientX, e.clientY);
+        console.log('Rect bounds:', rect);
+        console.log('Calculated coords:', x, y);
+        console.log('Calibration mode active:', tracker.calibrationMode);
+        
+        if (tracker.calibrationMode) {
+            console.log('Calling calibrateBallColor...');
             tracker.calibrateBallColor(x, y);
+            tracker.calibrationMode = false;
+            console.log('Calibration mode turned off');
+        } else {
+            console.log('Click ignored - not in calibration mode');
         }
     });
-    
-    // Add mode switching buttons
-    const controlsDiv = document.querySelector('.controls');
-    const handModeBtn = document.createElement('button');
-    handModeBtn.textContent = 'Hand Mode';
-    handModeBtn.addEventListener('click', () => tracker.switchTrackingMode('hands'));
-    
-    const ballModeBtn = document.createElement('button');
-    ballModeBtn.textContent = 'Ball Mode';
-    ballModeBtn.addEventListener('click', () => tracker.switchTrackingMode('ball'));
-    
-    controlsDiv.appendChild(handModeBtn);
-    controlsDiv.appendChild(ballModeBtn);
+});
+
+// Cleanup on page unload
+window.addEventListener('beforeunload', () => {
+    if (tracker) {
+        tracker.cleanup();
+    }
 });

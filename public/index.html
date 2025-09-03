@@ -27,7 +27,7 @@
         
         <div class="webcam-area">
             <div class="camera-container">
-                <video id="webcam" width="640" height="480" autoplay muted style="position: absolute; opacity: 0.5;"></video>
+                <video id="webcam" width="640" height="480" autoplay muted style="position: absolute; opacity: 0; pointer-events: none;"></video>
                 <canvas id="trackingCanvas" width="640" height="480"></canvas>
                 <div class="tracking-overlay">
                     <div class="crosshair"></div>
@@ -42,11 +42,7 @@
     </div>
     
     <script src="/socket.io/socket.io.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/objectron/objectron.js"></script>
+    <script async src="https://docs.opencv.org/4.5.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
     <script src="game.js"></script>
     <script src="tracking.js"></script>
 </body>
