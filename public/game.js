@@ -10,6 +10,7 @@ class HockeyIceAdventure {
         this.level = 1;
         this.timeLeft = 120;
         this.gameTimer = null;
+        this.gameSpeed = 1; // Default game speed multiplier
         
         // Three.js setup
         this.scene = null;
@@ -197,72 +198,75 @@ class HockeyIceAdventure {
     createHockeyPlayer() {
         const group = new THREE.Group();
         
+        // Make player MUCH bigger (2.5x scale)
+        const scale = 2.5;
+        
         // Player body (cylinder for torso)
-        const bodyGeometry = new THREE.CylinderGeometry(0.4, 0.3, 1.2, 8);
+        const bodyGeometry = new THREE.CylinderGeometry(0.4 * scale, 0.3 * scale, 1.2 * scale, 8);
         const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x0066cc }); // Blue jersey
         const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        body.position.y = 0.8;
+        body.position.y = 0.8 * scale;
         body.castShadow = true;
         group.add(body);
         
         // Head (sphere)
-        const headGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+        const headGeometry = new THREE.SphereGeometry(0.3 * scale, 16, 16);
         const headMaterial = new THREE.MeshLambertMaterial({ color: 0xffdbac }); // Skin color
         const head = new THREE.Mesh(headGeometry, headMaterial);
-        head.position.y = 1.7;
+        head.position.y = 1.7 * scale;
         head.castShadow = true;
         group.add(head);
         
         // Hockey helmet
-        const helmetGeometry = new THREE.SphereGeometry(0.32, 16, 16);
+        const helmetGeometry = new THREE.SphereGeometry(0.32 * scale, 16, 16);
         const helmetMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 }); // Red helmet
         const helmet = new THREE.Mesh(helmetGeometry, helmetMaterial);
-        helmet.position.y = 1.7;
+        helmet.position.y = 1.7 * scale;
         helmet.castShadow = true;
         group.add(helmet);
         
-        // Hockey stick
-        const stickGeometry = new THREE.CylinderGeometry(0.02, 0.02, 2, 8);
+        // Hockey stick (bigger and more prominent)
+        const stickGeometry = new THREE.CylinderGeometry(0.05 * scale, 0.05 * scale, 3 * scale, 8);
         const stickMaterial = new THREE.MeshLambertMaterial({ color: 0x8b4513 }); // Brown wood
         const stick = new THREE.Mesh(stickGeometry, stickMaterial);
-        stick.position.set(0.5, 0.8, 0);
-        stick.rotation.z = Math.PI / 6;
+        stick.position.set(0.8 * scale, 1.2 * scale, 0);
+        stick.rotation.z = Math.PI / 4;
         stick.castShadow = true;
         group.add(stick);
         
-        // Stick blade
-        const bladeGeometry = new THREE.BoxGeometry(0.05, 0.3, 0.8);
+        // Stick blade (bigger)
+        const bladeGeometry = new THREE.BoxGeometry(0.1 * scale, 0.5 * scale, 1.2 * scale);
         const bladeMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 }); // Black blade
         const blade = new THREE.Mesh(bladeGeometry, bladeMaterial);
-        blade.position.set(0.8, 0.1, 0);
+        blade.position.set(1.6 * scale, 0.2 * scale, 0);
         blade.castShadow = true;
         group.add(blade);
         
         // Legs (cylinders)
-        const legGeometry = new THREE.CylinderGeometry(0.15, 0.15, 0.8, 8);
+        const legGeometry = new THREE.CylinderGeometry(0.15 * scale, 0.15 * scale, 0.8 * scale, 8);
         const legMaterial = new THREE.MeshLambertMaterial({ color: 0x0066cc });
         
         const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
-        leftLeg.position.set(-0.2, 0.4, 0);
+        leftLeg.position.set(-0.2 * scale, 0.4 * scale, 0);
         leftLeg.castShadow = true;
         group.add(leftLeg);
         
         const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
-        rightLeg.position.set(0.2, 0.4, 0);
+        rightLeg.position.set(0.2 * scale, 0.4 * scale, 0);
         rightLeg.castShadow = true;
         group.add(rightLeg);
         
-        // Skates
-        const skateGeometry = new THREE.BoxGeometry(0.2, 0.1, 0.6);
+        // Skates (bigger)
+        const skateGeometry = new THREE.BoxGeometry(0.3 * scale, 0.15 * scale, 0.8 * scale);
         const skateMaterial = new THREE.MeshLambertMaterial({ color: 0x000000 });
         
         const leftSkate = new THREE.Mesh(skateGeometry, skateMaterial);
-        leftSkate.position.set(-0.2, 0.05, 0.1);
+        leftSkate.position.set(-0.2 * scale, 0.075 * scale, 0.1 * scale);
         leftSkate.castShadow = true;
         group.add(leftSkate);
         
         const rightSkate = new THREE.Mesh(skateGeometry, skateMaterial);
-        rightSkate.position.set(0.2, 0.05, 0.1);
+        rightSkate.position.set(0.2 * scale, 0.075 * scale, 0.1 * scale);
         rightSkate.castShadow = true;
         group.add(rightSkate);
         
@@ -286,85 +290,90 @@ class HockeyIceAdventure {
     createSnowman() {
         const group = new THREE.Group();
         
+        // Make snowmen MUCH bigger (2x scale)
+        const scale = 2;
+        
         // Bottom snowball (largest)
-        const bottomGeometry = new THREE.SphereGeometry(0.6, 16, 16);
+        const bottomGeometry = new THREE.SphereGeometry(0.6 * scale, 16, 16);
         const snowMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
         const bottom = new THREE.Mesh(bottomGeometry, snowMaterial);
-        bottom.position.y = 0.6;
+        bottom.position.y = 0.6 * scale;
         bottom.castShadow = true;
         group.add(bottom);
         
         // Middle snowball
-        const middleGeometry = new THREE.SphereGeometry(0.45, 16, 16);
+        const middleGeometry = new THREE.SphereGeometry(0.45 * scale, 16, 16);
         const middle = new THREE.Mesh(middleGeometry, snowMaterial);
-        middle.position.y = 1.35;
+        middle.position.y = 1.35 * scale;
         middle.castShadow = true;
         group.add(middle);
         
         // Head snowball
-        const headGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+        const headGeometry = new THREE.SphereGeometry(0.3 * scale, 16, 16);
         const head = new THREE.Mesh(headGeometry, snowMaterial);
-        head.position.y = 1.95;
+        head.position.y = 1.95 * scale;
         head.castShadow = true;
         group.add(head);
         
-        // Carrot nose
-        const noseGeometry = new THREE.ConeGeometry(0.05, 0.3, 8);
+        // Carrot nose (bigger)
+        const noseGeometry = new THREE.ConeGeometry(0.1 * scale, 0.5 * scale, 8);
         const noseMaterial = new THREE.MeshLambertMaterial({ color: 0xff8c00 });
         const nose = new THREE.Mesh(noseGeometry, noseMaterial);
-        nose.position.set(0, 1.95, 0.3);
+        nose.position.set(0, 1.95 * scale, 0.3 * scale);
         nose.rotation.x = Math.PI / 2;
         nose.castShadow = true;
         group.add(nose);
         
-        // Eyes (coal)
-        const eyeGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+        // Eyes (coal) - bigger
+        const eyeGeometry = new THREE.SphereGeometry(0.08 * scale, 8, 8);
         const eyeMaterial = new THREE.MeshLambertMaterial({ color: 0x000000 });
         
         const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        leftEye.position.set(-0.1, 2.05, 0.25);
+        leftEye.position.set(-0.15 * scale, 2.05 * scale, 0.25 * scale);
         group.add(leftEye);
         
         const rightEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-        rightEye.position.set(0.1, 2.05, 0.25);
+        rightEye.position.set(0.15 * scale, 2.05 * scale, 0.25 * scale);
         group.add(rightEye);
         
-        // Hat
-        const hatGeometry = new THREE.CylinderGeometry(0.3, 0.35, 0.4, 8);
+        // Hat (bigger)
+        const hatGeometry = new THREE.CylinderGeometry(0.3 * scale, 0.35 * scale, 0.4 * scale, 8);
         const hatMaterial = new THREE.MeshLambertMaterial({ color: 0x000000 });
         const hat = new THREE.Mesh(hatGeometry, hatMaterial);
-        hat.position.y = 2.4;
+        hat.position.y = 2.4 * scale;
         hat.castShadow = true;
         group.add(hat);
         
-        // Stick arms
-        const armGeometry = new THREE.CylinderGeometry(0.02, 0.02, 0.8, 8);
+        // Stick arms (bigger)
+        const armGeometry = new THREE.CylinderGeometry(0.04 * scale, 0.04 * scale, 1.2 * scale, 8);
         const armMaterial = new THREE.MeshLambertMaterial({ color: 0x8b4513 });
         
         const leftArm = new THREE.Mesh(armGeometry, armMaterial);
-        leftArm.position.set(-0.5, 1.35, 0);
+        leftArm.position.set(-0.8 * scale, 1.35 * scale, 0);
         leftArm.rotation.z = Math.PI / 4;
         leftArm.castShadow = true;
         group.add(leftArm);
         
         const rightArm = new THREE.Mesh(armGeometry, armMaterial);
-        rightArm.position.set(0.5, 1.35, 0);
+        rightArm.position.set(0.8 * scale, 1.35 * scale, 0);
         rightArm.rotation.z = -Math.PI / 4;
         rightArm.castShadow = true;
         group.add(rightArm);
         
-        // Random position
+        // Random position at top of field for straight-line movement
         group.position.set(
-            (Math.random() - 0.5) * 25,
+            (Math.random() - 0.5) * 36, // Spread across field width
             0,
-            -15 - Math.random() * 10
+            -20 - Math.random() * 5 // Start above the field
         );
         
-        // Add movement properties
+        // Add movement properties for straight-line movement
         group.userData = {
-            speed: Math.random() * 1.5 + 0.5,
+            speed: Math.random() * 2 + 1, // Slightly faster
             wobble: Math.random() * 2,
-            originalY: group.position.y
+            originalY: group.position.y,
+            direction: new THREE.Vector3(0, 0, 1), // Move straight down
+            startZ: group.position.z
         };
         
         this.scene.add(group);
@@ -403,6 +412,15 @@ class HockeyIceAdventure {
     initEventListeners() {
         document.getElementById('startBtn').addEventListener('click', () => this.startGame());
         document.getElementById('resetBtn').addEventListener('click', () => this.resetGame());
+        
+        // Speed slider control
+        const speedSlider = document.getElementById('speedSlider');
+        const speedValue = document.getElementById('speedValue');
+        
+        speedSlider.addEventListener('input', (e) => {
+            this.gameSpeed = parseFloat(e.target.value);
+            speedValue.textContent = this.gameSpeed.toFixed(1) + 'x';
+        });
         
         this.socket.on('ball-position', (data) => {
             this.ballPosition = data;
@@ -519,44 +537,38 @@ class HockeyIceAdventure {
             this.createSkatingTrail();
         }
         
-        // Update snowmen enemies
+        // Update snowmen enemies - straight line movement
         this.snowmen.forEach(snowman => {
-            // Move toward player
-            if (this.player) {
-                const direction = new THREE.Vector3();
-                direction.subVectors(this.player.position, snowman.position);
-                direction.normalize();
-                
-                snowman.position.x += direction.x * snowman.userData.speed * delta;
-                snowman.position.z += direction.z * snowman.userData.speed * delta;
-                
-                // Wobble animation
-                snowman.position.y = snowman.userData.originalY + 
-                    Math.sin(time * snowman.userData.wobble) * 0.1;
-                snowman.rotation.y += delta * 2;
-            }
+            // Move in straight line from top to bottom (increased speed with game speed)
+            snowman.position.z += snowman.userData.speed * delta * this.gameSpeed;
             
-            // Reset if too far
-            const distanceFromCenter = snowman.position.length();
-            if (distanceFromCenter > 30) {
+            // Wobble animation
+            snowman.position.y = snowman.userData.originalY + 
+                Math.sin(time * snowman.userData.wobble) * 0.1;
+            snowman.rotation.y += delta * 2;
+            
+            // Reset when snowman goes past bottom of field
+            if (snowman.position.z > 25) {
                 snowman.position.set(
-                    (Math.random() - 0.5) * 25,
+                    (Math.random() - 0.5) * 36, // Spread across field width
                     0,
-                    -15 - Math.random() * 10
+                    -20 - Math.random() * 5 // Start above the field
                 );
+                snowman.userData.startZ = snowman.position.z;
             }
             
-            // Check collision with player
-            if (this.player && snowman.position.distanceTo(this.player.position) < 1.5) {
+            // Check collision with player (bigger collision due to bigger models)
+            if (this.player && snowman.position.distanceTo(this.player.position) < 3) {
                 this.lives--;
                 this.createCollisionEffect(this.player.position);
                 
-                // Move snowman away
+                // Reset snowman after collision
                 snowman.position.set(
-                    (Math.random() - 0.5) * 25,
+                    (Math.random() - 0.5) * 36,
                     0,
-                    -15 - Math.random() * 10
+                    -20 - Math.random() * 5
                 );
+                snowman.userData.startZ = snowman.position.z;
                 
                 if (this.lives <= 0) {
                     this.endGame();
