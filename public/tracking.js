@@ -38,9 +38,10 @@ class OpenCVBallTracker {
         this.boundingBoxMode = false;
         this.boundingBox = { startX: 0, startY: 0, endX: 0, endY: 0, isDrawing: false };
         
-        // High resolution for better tracking
+        // Dynamic resolution based on video feed
         this.width = 640;
         this.height = 480;
+        this.videoAspectRatio = 16/9; // Default aspect ratio
         
         // Ball tracking configuration
         this.ballPosition = { x: 0.5, y: 0.5 };
@@ -64,22 +65,39 @@ class OpenCVBallTracker {
         this.hierarchy = null;
         
         console.log('About to call initWebcam()');
-        this.initWebcam().catch(error => {
-            console.error('initWebcam failed:', error);
-        });
+        
+        // Ensure DOM is fully loaded before trying to access camera
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => {
+                console.log('DOM loaded, now initializing camera...');
+                this.initWebcam().catch(error => {
+                    console.error('initWebcam failed:', error);
+                    document.getElementById('status').textContent = 'Camera failed: ' + error.message;
+                });
+            });
+        } else {
+            console.log('DOM already loaded, initializing camera immediately...');
+            this.initWebcam().catch(error => {
+                console.error('initWebcam failed:', error);
+                document.getElementById('status').textContent = 'Camera failed: ' + error.message;
+            });
+        }
     }
     
     async initWebcam() {
         try {
             console.log('=== INITIALIZING WEBCAM ===');
+            document.getElementById('status').textContent = 'Requesting camera access...';
             
             // Check if getUserMedia is available
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                throw new Error('getUserMedia not supported in this browser');
+                throw new Error('getUserMedia not supported in this browser. Please use Chrome, Firefox, or Safari.');
             }
             
             console.log('getUserMedia available, requesting user media...');
             console.log('navigator.mediaDevices:', navigator.mediaDevices);
+            
+            document.getElementById('status').textContent = 'Connecting to camera...';
             
             const stream = await navigator.mediaDevices.getUserMedia({
                 video: {
@@ -91,36 +109,131 @@ class OpenCVBallTracker {
             });
             
             console.log('Got media stream:', stream);
-            this.video.srcObject = stream;
+            document.getElementById('status').textContent = 'Camera connected, starting video...';
             
-            console.log('Starting video playback...');
-            await this.video.play();
+            // Set up video element first before assigning stream
+            this.video.muted = true;
+            this.video.playsInline = true;
+            this.video.autoplay = true;
+            
+            // Add event listeners before setting srcObject
+            this.video.addEventListener('loadedmetadata', () => {
+                console.log('Video metadata loaded, dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
+                this.fixAspectRatio();
+            });
             
             this.video.addEventListener('loadeddata', () => {
-                console.log('Video loaded, dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
-                console.log('Video readyState:', this.video.readyState);
-                document.getElementById('status').textContent = 'Webcam ready, waiting for OpenCV...';
+                console.log('Video data loaded, readyState:', this.video.readyState);
+                document.getElementById('status').textContent = this.isOpenCVReady ? 
+                    'Ready! Click Calibrate to start tracking.' : 
+                    'Video ready, loading OpenCV...';
                 this.startTracking();
             });
             
             this.video.addEventListener('canplay', () => {
                 console.log('Video can start playing');
+                document.getElementById('status').textContent = 'Video ready, preparing interface...';
             });
             
             this.video.addEventListener('playing', () => {
                 console.log('Video is now playing');
+                document.getElementById('status').textContent = this.isOpenCVReady ? 
+                    'Ready! Click Calibrate to start tracking.' : 
+                    'Video playing, loading OpenCV...';
             });
+            
+            this.video.addEventListener('error', (e) => {
+                console.error('Video error:', e);
+                document.getElementById('status').textContent = 'Video error: ' + e.message;
+            });
+            
+            // Now assign the stream
+            this.video.srcObject = stream;
+            
+            console.log('Stream assigned, attempting to play...');
+            
+            // Force play with better error handling
+            try {
+                await this.video.play();
+                console.log('Video play() succeeded');
+                
+                // Force initial tracking start if events don't fire
+                setTimeout(() => {
+                    if (this.video.readyState >= 2) { // HAVE_CURRENT_DATA or better
+                        console.log('Force-starting tracking after timeout');
+                        this.fixAspectRatio();
+                        this.startTracking();
+                        document.getElementById('status').textContent = this.isOpenCVReady ? 
+                            'Ready! Click Calibrate to start tracking.' : 
+                            'Video ready, loading OpenCV...';
+                    }
+                }, 2000);
+                
+            } catch (playError) {
+                console.error('Video play failed:', playError);
+                document.getElementById('status').textContent = 'Failed to start video: ' + playError.message;
+            }
             
         } catch (error) {
             console.error('Error accessing webcam:', error);
-            document.getElementById('status').textContent = 'Failed to access webcam: ' + error.message;
+            const errorMsg = error.name === 'NotAllowedError' ? 
+                'Camera access denied. Please allow camera access and refresh the page.' :
+                error.name === 'NotFoundError' ?
+                'No camera found. Please connect a camera and refresh the page.' :
+                'Failed to access camera: ' + error.message;
+            document.getElementById('status').textContent = errorMsg;
         }
     }
     
     onOpenCVReady() {
+        console.log('=== OPENCV READY ===');
         this.isOpenCVReady = true;
         this.initializeOpenCVMatrices();
-        document.getElementById('status').textContent = 'OpenCV ready! Click Calibrate to start ball tracking.';
+        
+        // Update status based on current state
+        if (this.video && this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
+            document.getElementById('status').textContent = 'Ready! Click Calibrate to start tracking.';
+        } else {
+            document.getElementById('status').textContent = 'OpenCV loaded, waiting for camera...';
+        }
+    }
+    
+    fixAspectRatio() {
+        console.log('=== FIXING ASPECT RATIO ===');
+        console.log('Video dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
+        
+        if (this.video.videoWidth > 0 && this.video.videoHeight > 0) {
+            this.videoAspectRatio = this.video.videoWidth / this.video.videoHeight;
+            console.log('Video aspect ratio:', this.videoAspectRatio);
+            
+            // Update canvas dimensions to match video - use fixed size for now
+            this.width = 640;
+            this.height = Math.round(640 / this.videoAspectRatio);
+            
+            const canvasElement = this.trackingCanvas;
+            canvasElement.width = this.width;
+            canvasElement.height = this.height;
+            canvasElement.style.width = this.width + 'px';
+            canvasElement.style.height = this.height + 'px';
+            
+            console.log('Fixed canvas dimensions:', this.width + 'x' + this.height);
+            
+            // Reinitialize OpenCV matrices with new dimensions
+            if (this.isOpenCVReady) {
+                this.cleanup();
+                this.initializeOpenCVMatrices();
+            }
+            
+            // Clear the canvas to remove any test patterns
+            this.trackingCtx.clearRect(0, 0, this.width, this.height);
+            this.trackingCtx.fillStyle = '#1a1a1a';
+            this.trackingCtx.fillRect(0, 0, this.width, this.height);
+        } else {
+            console.log('Video dimensions not available yet');
+            // Use default dimensions
+            this.width = 640;
+            this.height = 480;
+        }
     }
     
     initializeOpenCVMatrices() {
@@ -138,6 +251,8 @@ class OpenCVBallTracker {
     
     startTracking() {
         console.log('=== STARTING TRACKING LOOP ===');
+        console.log('Video ready state:', this.video.readyState);
+        console.log('Video dimensions:', this.video.videoWidth, 'x', this.video.videoHeight);
         this.isTracking = true;
         this.trackingLoop();
     }
@@ -145,32 +260,37 @@ class OpenCVBallTracker {
     trackingLoop() {
         if (!this.isTracking) return;
         
-        // Debug: Log every 60 frames (about once per second at 60fps)
+        // Debug: Log first few frames and then every 60 frames
         if (!this.frameCount) this.frameCount = 0;
         this.frameCount++;
-        if (this.frameCount % 60 === 0) {
-            console.log('Tracking loop running, frame:', this.frameCount, 'video ready:', this.video.readyState);
+        if (this.frameCount <= 10 || this.frameCount % 60 === 0) {
+            console.log('Tracking loop frame:', this.frameCount, 'video ready state:', this.video.readyState, 
+                       'HAVE_ENOUGH_DATA:', this.video.HAVE_ENOUGH_DATA);
         }
         
         try {
-            // Always draw video frame first
+            // Clear canvas first
+            this.trackingCtx.clearRect(0, 0, this.width, this.height);
+            
+            // Always draw video frame first with proper aspect ratio
             if (this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
                 this.trackingCtx.save();
                 this.trackingCtx.scale(-1, 1);
+                // Draw video maintaining its aspect ratio
                 this.trackingCtx.drawImage(this.video, -this.width, 0, this.width, this.height);
                 this.trackingCtx.restore();
             } else {
-                // Debug info when video not ready
-                console.log('Video not ready, readyState:', this.video.readyState);
-                // Fill with grey background to show canvas is working
-                this.trackingCtx.fillStyle = '#333333';
+                // Fill with dark background to show canvas is working
+                this.trackingCtx.fillStyle = '#1a1a1a';
                 this.trackingCtx.fillRect(0, 0, this.width, this.height);
                 
                 // Show status text
                 this.trackingCtx.fillStyle = '#FFFFFF';
-                this.trackingCtx.font = 'bold 24px Arial';
+                this.trackingCtx.font = 'bold 20px Arial';
                 this.trackingCtx.textAlign = 'center';
-                this.trackingCtx.fillText('Loading camera...', this.width/2, this.height/2);
+                this.trackingCtx.fillText('Initializing camera...', this.width/2, this.height/2 - 10);
+                this.trackingCtx.font = '16px Arial';
+                this.trackingCtx.fillText('Please allow camera access', this.width/2, this.height/2 + 20);
                 this.trackingCtx.textAlign = 'left';
             }
             
@@ -293,8 +413,8 @@ class OpenCVBallTracker {
                     const currentArea = cv.contourArea(bestContour);
                     this.trackingQuality = Math.min(95, (currentArea / 50) * 10);
                     
-                    // Draw tracking visualization 
-                    this.drawObjectTracking(centerX, centerY, currentArea);
+                    // Draw tracking visualization with bounding box
+                    this.drawObjectTracking(centerX, centerY, currentArea, bestContour);
                 }
             } else {
                 // More gradual quality degradation
@@ -446,8 +566,8 @@ class OpenCVBallTracker {
                 this.applyPositionWithSmoothing(position);
                 this.trackingQuality = Math.min(95, (bestCluster.density / minClusterSize) * 30);
                 
-                // Draw tracking visualization 
-                this.drawObjectTracking(bestCluster.x, bestCluster.y, bestCluster.density * 15);
+                // Draw tracking visualization with bounding box
+                this.drawObjectTracking(bestCluster.x, bestCluster.y, bestCluster.density * 15, null);
             } else {
                 this.trackingQuality = Math.max(0, this.trackingQuality - 8);
                 console.log('No valid clusters found');
@@ -520,7 +640,7 @@ class OpenCVBallTracker {
         this.lastValidPosition = { ...this.ballPosition };
     }
     
-    drawObjectTracking(x, y, area) {
+    drawObjectTracking(x, y, area, contour = null) {
         try {
             // Make tracking marker much more visible and adaptive
             const size = Math.max(25, Math.min(100, Math.sqrt(area) / 2));
@@ -529,28 +649,50 @@ class OpenCVBallTracker {
             const qualityColor = this.trackingQuality > 70 ? '#00FF00' : 
                                 this.trackingQuality > 40 ? '#FFFF00' : '#FF8800';
             
-            // Draw adaptive tracking circle
-            this.trackingCtx.strokeStyle = qualityColor;
-            this.trackingCtx.lineWidth = 5;
-            this.trackingCtx.beginPath();
-            this.trackingCtx.arc(x, y, size, 0, 2 * Math.PI);
-            this.trackingCtx.stroke();
+            // Draw bounding box if contour is available (OpenCV tracking)
+            if (contour && typeof cv !== 'undefined') {
+                try {
+                    const rect = cv.boundingRect(contour);
+                    
+                    // Draw bounding rectangle
+                    this.trackingCtx.strokeStyle = qualityColor;
+                    this.trackingCtx.lineWidth = 3;
+                    this.trackingCtx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+                    
+                    // Draw corner markers
+                    const cornerSize = 8;
+                    this.trackingCtx.fillStyle = qualityColor;
+                    this.trackingCtx.fillRect(rect.x - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(rect.x + rect.width - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(rect.x - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(rect.x + rect.width - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
+                } catch (boundingError) {
+                    console.error('Error drawing contour bounding box:', boundingError);
+                }
+            } else {
+                // Draw estimated bounding box for simple tracking
+                const estimatedSize = Math.sqrt(area);
+                const boxX = x - estimatedSize/2;
+                const boxY = y - estimatedSize/2;
+                
+                this.trackingCtx.strokeStyle = qualityColor;
+                this.trackingCtx.lineWidth = 3;
+                this.trackingCtx.strokeRect(boxX, boxY, estimatedSize, estimatedSize);
+                
+                // Draw corner markers
+                const cornerSize = 8;
+                this.trackingCtx.fillStyle = qualityColor;
+                this.trackingCtx.fillRect(boxX - cornerSize/2, boxY - cornerSize/2, cornerSize, cornerSize);
+                this.trackingCtx.fillRect(boxX + estimatedSize - cornerSize/2, boxY - cornerSize/2, cornerSize, cornerSize);
+                this.trackingCtx.fillRect(boxX - cornerSize/2, boxY + estimatedSize - cornerSize/2, cornerSize, cornerSize);
+                this.trackingCtx.fillRect(boxX + estimatedSize - cornerSize/2, boxY + estimatedSize - cornerSize/2, cornerSize, cornerSize);
+            }
             
-            // Draw center dot
+            // Draw center dot only (no circular marker or crosshair)
             this.trackingCtx.fillStyle = qualityColor;
             this.trackingCtx.beginPath();
-            this.trackingCtx.arc(x, y, 6, 0, 2 * Math.PI);
+            this.trackingCtx.arc(x, y, 8, 0, 2 * Math.PI);
             this.trackingCtx.fill();
-            
-            // Draw crosshair
-            this.trackingCtx.strokeStyle = '#FF00FF';
-            this.trackingCtx.lineWidth = 3;
-            this.trackingCtx.beginPath();
-            this.trackingCtx.moveTo(x - size*0.6, y);
-            this.trackingCtx.lineTo(x + size*0.6, y);
-            this.trackingCtx.moveTo(x, y - size*0.6);
-            this.trackingCtx.lineTo(x, y + size*0.6);
-            this.trackingCtx.stroke();
             
             // Show tracking info with quality indicator
             this.trackingCtx.fillStyle = '#FFFFFF';
@@ -585,14 +727,16 @@ class OpenCVBallTracker {
             this.trackingCtx.strokeRect(4, 4, this.width - 8, this.height - 8);
             
             // Calibration text
-            this.trackingCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-            this.trackingCtx.fillRect(this.width/2 - 150, 20, 300, 60);
+            this.trackingCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            this.trackingCtx.fillRect(this.width/2 - 180, 20, 360, 80);
             this.trackingCtx.fillStyle = '#FFFF00';
-            this.trackingCtx.font = 'bold 18px Arial';
+            this.trackingCtx.font = 'bold 20px Arial';
             this.trackingCtx.textAlign = 'center';
             this.trackingCtx.fillText('CALIBRATION MODE', this.width/2, 45);
+            this.trackingCtx.font = 'bold 16px Arial';
+            this.trackingCtx.fillText('Click and drag to select object to track', this.width/2, 70);
             this.trackingCtx.font = '14px Arial';
-            this.trackingCtx.fillText('Click and drag to select object', this.width/2, 65);
+            this.trackingCtx.fillText('Make sure object is clearly visible', this.width/2, 90);
             this.trackingCtx.textAlign = 'left';
         } catch (error) {
             console.error('Calibration overlay draw error:', error);
@@ -621,8 +765,14 @@ class OpenCVBallTracker {
         this.calibrationMode = true;
         this.boundingBoxMode = true;
         this.boundingBox = { startX: 0, startY: 0, endX: 0, endY: 0, isDrawing: false };
+        
+        // Reset tracking quality to show calibration is needed
+        this.trackingQuality = 0;
+        this.isCalibrated = false;
+        this.targetColor = null;
+        
         document.getElementById('status').textContent = 
-            'BOUNDING BOX MODE: Click and drag to select the object to track';
+            'CALIBRATION MODE: Click and drag to select the object to track';
     }
     
     calibrateFromBoundingBox() {
@@ -824,18 +974,17 @@ window.addEventListener('load', () => {
     console.log('Canvas context:', ctx);
     console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
     
-    // Draw a simple test pattern to verify canvas is working
-    ctx.fillStyle = '#FF0000';
-    ctx.fillRect(0, 0, 100, 100);
-    ctx.fillStyle = '#00FF00';
-    ctx.fillRect(100, 0, 100, 100);
-    ctx.fillStyle = '#0000FF';
-    ctx.fillRect(0, 100, 100, 100);
+    // Clear any existing content and show loading state
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = '#FFFFFF';
-    ctx.font = '20px Arial';
-    ctx.fillText('CANVAS TEST', 10, 250);
+    ctx.font = 'bold 24px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Starting up...', canvas.width/2, canvas.height/2);
+    ctx.textAlign = 'left';
     
-    console.log('Drew test pattern - should be visible if canvas works');
+    console.log('Canvas initialized and ready for video');
     
     tracker = new OpenCVBallTracker();
     
@@ -849,18 +998,7 @@ window.addEventListener('load', () => {
         }
     });
     
-    document.getElementById('initCameraBtn').addEventListener('click', () => {
-        console.log('=== MANUAL CAMERA INIT BUTTON CLICKED ===');
-        if (tracker) {
-            console.log('Manually triggering camera initialization...');
-            tracker.initWebcam().catch(error => {
-                console.error('Manual camera init failed:', error);
-                alert('Camera initialization failed: ' + error.message);
-            });
-        } else {
-            console.error('Tracker not initialized');
-        }
-    });
+    // Camera initialization is now automatic - no manual button needed
     
     // Use the canvas variable already declared above
     
