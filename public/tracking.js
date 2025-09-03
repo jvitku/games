@@ -9,9 +9,9 @@ function onOpenCvReady() {
 }
 window.onOpenCvReady = onOpenCvReady;
 
-class OpenCVBallTracker {
+class GenericFeatureTracker {
     constructor() {
-        console.log('=== INITIALIZING OpenCVBallTracker ===');
+        console.log('=== INITIALIZING GenericFeatureTracker ===');
         
         // Check browser environment
         console.log('Current URL:', window.location.href);
@@ -25,6 +25,13 @@ class OpenCVBallTracker {
         this.trackingCtx = this.trackingCanvas.getContext('2d');
         this.socket = io();
         
+        // MediaPipe variables
+        this.pose = null;
+        this.camera = null;
+        this.isMediaPipeReady = false;
+        this.trackedFeatureIndex = null; // Which feature/landmark we're tracking
+        this.calibratedRegion = null; // The region we calibrated on
+        
         console.log('Video element:', this.video);
         console.log('Canvas element:', this.trackingCanvas);
         console.log('Canvas context:', this.trackingCtx);
@@ -33,6 +40,7 @@ class OpenCVBallTracker {
         this.trackingQuality = 0;
         this.isTracking = false;
         this.isOpenCVReady = false;
+        this.preferMediaPipe = true; // Prefer MediaPipe over OpenCV
         this.isCalibrated = false;
         this.calibrationMode = false;
         this.boundingBoxMode = false;
@@ -43,8 +51,8 @@ class OpenCVBallTracker {
         this.height = 480;
         this.videoAspectRatio = 16/9; // Default aspect ratio
         
-        // Ball tracking configuration
-        this.ballPosition = { x: 0.5, y: 0.5 };
+        // Object tracking configuration
+        this.objectPosition = { x: 0.5, y: 0.5 };
         this.lastValidPosition = { x: 0.5, y: 0.5 };
         this.positionHistory = [];
         this.maxHistorySize = 5;
@@ -64,7 +72,10 @@ class OpenCVBallTracker {
         this.contours = null;
         this.hierarchy = null;
         
-        console.log('About to call initWebcam()');
+        console.log('About to initialize MediaPipe and camera...');
+        
+        // Initialize MediaPipe first, then camera
+        this.initMediaPipe();
         
         // Ensure DOM is fully loaded before trying to access camera
         if (document.readyState === 'loading') {
@@ -125,7 +136,7 @@ class OpenCVBallTracker {
             this.video.addEventListener('loadeddata', () => {
                 console.log('Video data loaded, readyState:', this.video.readyState);
                 document.getElementById('status').textContent = this.isOpenCVReady ? 
-                    'Ready! Click Calibrate to start tracking.' : 
+                    'Ready! Click Calibrate to select object to track.' : 
                     'Video ready, loading OpenCV...';
                 this.startTracking();
             });
@@ -138,7 +149,7 @@ class OpenCVBallTracker {
             this.video.addEventListener('playing', () => {
                 console.log('Video is now playing');
                 document.getElementById('status').textContent = this.isOpenCVReady ? 
-                    'Ready! Click Calibrate to start tracking.' : 
+                    'Ready! Click Calibrate to select object to track.' : 
                     'Video playing, loading OpenCV...';
             });
             
@@ -164,7 +175,7 @@ class OpenCVBallTracker {
                         this.fixAspectRatio();
                         this.startTracking();
                         document.getElementById('status').textContent = this.isOpenCVReady ? 
-                            'Ready! Click Calibrate to start tracking.' : 
+                            'Ready! Click Calibrate to select object to track.' : 
                             'Video ready, loading OpenCV...';
                     }
                 }, 2000);
@@ -185,16 +196,118 @@ class OpenCVBallTracker {
         }
     }
     
+    initMediaPipe() {
+        console.log('=== INITIALIZING MEDIAPIPE POSE ===');
+        
+        try {
+            // Check if MediaPipe is available
+            if (typeof window.Pose === 'undefined') {
+                console.log('MediaPipe Pose not available, will use OpenCV fallback');
+                this.preferMediaPipe = false;
+                return;
+            }
+            
+            // Initialize MediaPipe Pose for feature detection
+            this.pose = new window.Pose({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+                }
+            });
+            
+            this.pose.setOptions({
+                modelComplexity: 1,
+                smoothLandmarks: true,
+                enableSegmentation: false,
+                smoothSegmentation: false,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            this.pose.onResults((results) => {
+                this.onMediaPipeResults(results);
+            });
+            
+            this.isMediaPipeReady = true;
+            console.log('MediaPipe Pose initialized successfully');
+            
+        } catch (error) {
+            console.error('Failed to initialize MediaPipe:', error);
+            this.preferMediaPipe = false;
+        }
+    }
+    
+    onMediaPipeResults(results) {
+        if (results.poseLandmarks && results.poseLandmarks.length > 0) {
+            // If we have a calibrated region, find the closest landmark to that region
+            if (this.calibratedRegion && this.trackedFeatureIndex === null) {
+                this.findClosestLandmarkToRegion(results.poseLandmarks);
+            }
+            
+            // Track the selected landmark or use a default one
+            let targetLandmark = null;
+            if (this.trackedFeatureIndex !== null && this.trackedFeatureIndex < results.poseLandmarks.length) {
+                targetLandmark = results.poseLandmarks[this.trackedFeatureIndex];
+            } else if (results.poseLandmarks.length > 0) {
+                // Default to nose (index 0) or wrist (index 15/16) if no specific feature selected
+                targetLandmark = results.poseLandmarks[15] || results.poseLandmarks[16] || results.poseLandmarks[0];
+            }
+            
+            if (targetLandmark) {
+                const centerX = targetLandmark.x * this.width;
+                const centerY = targetLandmark.y * this.height;
+                
+                const position = {
+                    x: targetLandmark.x,
+                    y: targetLandmark.y
+                };
+                
+                this.applyPositionWithSmoothing(position);
+                this.trackingQuality = Math.min(95, targetLandmark.visibility * 100);
+                
+                // Draw MediaPipe tracking visualization
+                this.drawMediaPipeTracking(centerX, centerY, targetLandmark, this.trackedFeatureIndex);
+            }
+        } else {
+            this.trackingQuality = Math.max(0, this.trackingQuality - 5);
+        }
+    }
+    
+    findClosestLandmarkToRegion(landmarks) {
+        if (!this.calibratedRegion) return;
+        
+        const regionCenterX = (this.calibratedRegion.left + this.calibratedRegion.right) / 2 / this.width;
+        const regionCenterY = (this.calibratedRegion.top + this.calibratedRegion.bottom) / 2 / this.height;
+        
+        let closestIndex = 0;
+        let minDistance = Infinity;
+        
+        landmarks.forEach((landmark, index) => {
+            const distance = Math.sqrt(
+                Math.pow(landmark.x - regionCenterX, 2) + 
+                Math.pow(landmark.y - regionCenterY, 2)
+            );
+            
+            if (distance < minDistance) {
+                minDistance = distance;
+                closestIndex = index;
+            }
+        });
+        
+        this.trackedFeatureIndex = closestIndex;
+        console.log(`Selected landmark ${closestIndex} as closest to calibrated region`);
+    }
+    
     onOpenCVReady() {
         console.log('=== OPENCV READY ===');
         this.isOpenCVReady = true;
         this.initializeOpenCVMatrices();
         
-        // Update status based on current state
+        // Update status based on current state and preferred tracking method
+        const trackingMethod = this.preferMediaPipe && this.isMediaPipeReady ? 'MediaPipe' : 'OpenCV';
         if (this.video && this.video.readyState === this.video.HAVE_ENOUGH_DATA) {
-            document.getElementById('status').textContent = 'Ready! Click Calibrate to start tracking.';
+            document.getElementById('status').textContent = `Ready (${trackingMethod})! Click Calibrate to select object to track.`;
         } else {
-            document.getElementById('status').textContent = 'OpenCV loaded, waiting for camera...';
+            document.getElementById('status').textContent = `${trackingMethod} loaded, waiting for camera...`;
         }
     }
     
@@ -294,17 +407,20 @@ class OpenCVBallTracker {
                 this.trackingCtx.textAlign = 'left';
             }
             
-            // Perform object tracking if calibrated
-            if (this.isCalibrated && this.targetColor) {
-                console.log('Tracking calibrated object:', this.targetColor);
-                if (this.isOpenCVReady && typeof cv !== 'undefined') {
-                    this.performBallTracking();
-                } else {
-                    // Simple fallback color tracking without OpenCV
-                    this.performSimpleColorTracking();
+            // Only perform tracking if calibrated and not in calibration mode
+            if (this.isCalibrated && !this.calibrationMode) {
+                if (this.preferMediaPipe && this.isMediaPipeReady && this.camera) {
+                    // MediaPipe handles tracking automatically via camera onFrame callback
+                    // No need to manually send frames here - camera handles it
+                } else if (this.targetColor) {
+                    console.log('Tracking calibrated object with OpenCV:', this.targetColor);
+                    if (this.isOpenCVReady && typeof cv !== 'undefined') {
+                        this.performObjectTracking();
+                    } else {
+                        // Simple fallback color tracking without OpenCV
+                        this.performSimpleColorTracking();
+                    }
                 }
-            } else if (this.isCalibrated) {
-                console.log('Calibrated but no target color set');
             }
             
             // Draw calibration overlay if in calibration mode
@@ -325,7 +441,7 @@ class OpenCVBallTracker {
         requestAnimationFrame(() => this.trackingLoop());
     }
     
-    performBallTracking() {
+    performObjectTracking() {
         try {
             // Get image data from canvas (after video is drawn)
             const imageData = this.trackingCtx.getImageData(0, 0, this.width, this.height);
@@ -338,17 +454,17 @@ class OpenCVBallTracker {
             cv.cvtColor(this.src, rgb, cv.COLOR_RGBA2RGB);
             cv.cvtColor(rgb, this.hsv, cv.COLOR_RGB2HSV);
             
-            // Create more generous scalar values for color range
+            // Use exact tolerance values without multiplying
             const lowerBound = new cv.Scalar(
-                Math.max(0, this.targetColor.h - this.colorTolerance.h * 1.2),
-                Math.max(0, this.targetColor.s - this.colorTolerance.s * 1.2),
-                Math.max(0, this.targetColor.v - this.colorTolerance.v * 1.2)
+                Math.max(0, this.targetColor.h - this.colorTolerance.h),
+                Math.max(0, this.targetColor.s - this.colorTolerance.s),
+                Math.max(0, this.targetColor.v - this.colorTolerance.v)
             );
             
             const upperBound = new cv.Scalar(
-                Math.min(179, this.targetColor.h + this.colorTolerance.h * 1.2),
-                Math.min(255, this.targetColor.s + this.colorTolerance.s * 1.2),
-                Math.min(255, this.targetColor.v + this.colorTolerance.v * 1.2)
+                Math.min(179, this.targetColor.h + this.colorTolerance.h),
+                Math.min(255, this.targetColor.s + this.colorTolerance.s),
+                Math.min(255, this.targetColor.v + this.colorTolerance.v)
             );
             
             console.log('OpenCV color bounds:', {
@@ -370,7 +486,7 @@ class OpenCVBallTracker {
             // Find contours
             cv.findContours(this.mask, this.contours, this.hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
             
-            // Find the best contour (prefer size similar to calibrated object)
+            // Find the best contour (prefer size and position similar to calibrated object)
             let bestContour = null;
             let maxScore = 0;
             let bestCenter = null;
@@ -380,18 +496,34 @@ class OpenCVBallTracker {
                 const area = cv.contourArea(contour);
                 
                 if (area > this.minContourArea && area < this.maxContourArea) {
-                    // Score based on area size and similarity to expected size
-                    let score = area;
-                    
-                    // Bonus for similarity to expected size from calibration
-                    if (this.expectedSize && this.expectedSize.area) {
-                        const sizeRatio = Math.min(area / this.expectedSize.area, this.expectedSize.area / area);
-                        score *= (0.5 + sizeRatio * 0.5); // Bonus for size similarity
-                    }
-                    
-                    if (score > maxScore) {
-                        maxScore = score;
-                        bestContour = contour;
+                    // Calculate contour center
+                    const moments = cv.moments(contour);
+                    if (moments.m00 > 0) {
+                        const centerX = moments.m10 / moments.m00;
+                        const centerY = moments.m01 / moments.m00;
+                        
+                        // Base score on area
+                        let score = area;
+                        
+                        // Strong bonus for size similarity to expected size
+                        if (this.expectedSize && this.expectedSize.area) {
+                            const sizeRatio = Math.min(area / this.expectedSize.area, this.expectedSize.area / area);
+                            score *= (0.2 + sizeRatio * 0.8); // Strong size preference
+                        }
+                        
+                        // Bonus for proximity to last known position (continuity)
+                        if (this.trackingQuality > 0 && this.lastValidPosition) {
+                            const lastX = this.lastValidPosition.x * this.width;
+                            const lastY = this.lastValidPosition.y * this.height;
+                            const distance = Math.sqrt(Math.pow(centerX - lastX, 2) + Math.pow(centerY - lastY, 2));
+                            const proximityBonus = Math.max(0, 1 - (distance / 200)); // Closer is better
+                            score *= (0.7 + proximityBonus * 0.3);
+                        }
+                        
+                        if (score > maxScore) {
+                            maxScore = score;
+                            bestContour = contour;
+                        }
                     }
                 }
             }
@@ -427,7 +559,7 @@ class OpenCVBallTracker {
             kernel.delete();
             
         } catch (error) {
-            console.error('Ball tracking error:', error);
+            console.error('Object tracking error:', error);
             this.trackingQuality = Math.max(0, this.trackingQuality - 10);
         }
     }
@@ -441,9 +573,9 @@ class OpenCVBallTracker {
             const targetRGB = this.hsvToRgb(this.targetColor.h * 2, this.targetColor.s / 255, this.targetColor.v / 255);
             
             let clusters = [];
-            const step = 6; // Smaller step for better detection
-            const tolerance = 80; // Much more tolerant for better detection
-            const minClusterSize = 8; // Even lower requirement for easier detection
+            const step = 4; // Smaller step for better detection
+            const tolerance = 50; // More precise tolerance
+            const minClusterSize = 12; // Higher requirement for better accuracy
             
             console.log('Target RGB for tracking:', targetRGB);
             console.log('Using tolerances - RGB:', tolerance, 'HSV:', this.colorTolerance);
@@ -635,13 +767,16 @@ class OpenCVBallTracker {
             totalWeight += weight;
         });
         
-        this.ballPosition.x = totalX / totalWeight;
-        this.ballPosition.y = totalY / totalWeight;
-        this.lastValidPosition = { ...this.ballPosition };
+        this.objectPosition.x = totalX / totalWeight;
+        this.objectPosition.y = totalY / totalWeight;
+        this.lastValidPosition = { ...this.objectPosition };
     }
     
     drawObjectTracking(x, y, area, contour = null) {
         try {
+            // Fix mirrored position - since video is mirrored, we need to un-mirror the display
+            const correctedX = this.width - x;
+            
             // Make tracking marker much more visible and adaptive
             const size = Math.max(25, Math.min(100, Math.sqrt(area) / 2));
             
@@ -653,26 +788,28 @@ class OpenCVBallTracker {
             if (contour && typeof cv !== 'undefined') {
                 try {
                     const rect = cv.boundingRect(contour);
+                    // Correct the bounding rectangle position
+                    const correctedRectX = this.width - rect.x - rect.width;
                     
                     // Draw bounding rectangle
                     this.trackingCtx.strokeStyle = qualityColor;
                     this.trackingCtx.lineWidth = 3;
-                    this.trackingCtx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+                    this.trackingCtx.strokeRect(correctedRectX, rect.y, rect.width, rect.height);
                     
                     // Draw corner markers
                     const cornerSize = 8;
                     this.trackingCtx.fillStyle = qualityColor;
-                    this.trackingCtx.fillRect(rect.x - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
-                    this.trackingCtx.fillRect(rect.x + rect.width - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
-                    this.trackingCtx.fillRect(rect.x - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
-                    this.trackingCtx.fillRect(rect.x + rect.width - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(correctedRectX - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(correctedRectX + rect.width - cornerSize/2, rect.y - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(correctedRectX - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
+                    this.trackingCtx.fillRect(correctedRectX + rect.width - cornerSize/2, rect.y + rect.height - cornerSize/2, cornerSize, cornerSize);
                 } catch (boundingError) {
                     console.error('Error drawing contour bounding box:', boundingError);
                 }
             } else {
                 // Draw estimated bounding box for simple tracking
                 const estimatedSize = Math.sqrt(area);
-                const boxX = x - estimatedSize/2;
+                const boxX = correctedX - estimatedSize/2;
                 const boxY = y - estimatedSize/2;
                 
                 this.trackingCtx.strokeStyle = qualityColor;
@@ -691,7 +828,7 @@ class OpenCVBallTracker {
             // Draw center dot only (no circular marker or crosshair)
             this.trackingCtx.fillStyle = qualityColor;
             this.trackingCtx.beginPath();
-            this.trackingCtx.arc(x, y, 8, 0, 2 * Math.PI);
+            this.trackingCtx.arc(correctedX, y, 8, 0, 2 * Math.PI);
             this.trackingCtx.fill();
             
             // Show tracking info with quality indicator
@@ -700,13 +837,13 @@ class OpenCVBallTracker {
             this.trackingCtx.strokeStyle = '#000000';
             this.trackingCtx.lineWidth = 4;
             const infoText = `OBJECT: ${Math.round(area)}px (${this.trackingQuality.toFixed(0)}%)`;
-            this.trackingCtx.strokeText(infoText, x + 50, y - 35);
-            this.trackingCtx.fillText(infoText, x + 50, y - 35);
+            this.trackingCtx.strokeText(infoText, correctedX + 50, y - 35);
+            this.trackingCtx.fillText(infoText, correctedX + 50, y - 35);
             
-            // Show position coordinates
-            const posText = `X:${(x/this.width*100).toFixed(0)}% Y:${(y/this.height*100).toFixed(0)}%`;
-            this.trackingCtx.strokeText(posText, x + 50, y - 15);
-            this.trackingCtx.fillText(posText, x + 50, y - 15);
+            // Show position coordinates (use corrected position for display)
+            const posText = `X:${(correctedX/this.width*100).toFixed(0)}% Y:${(y/this.height*100).toFixed(0)}%`;
+            this.trackingCtx.strokeText(posText, correctedX + 50, y - 15);
+            this.trackingCtx.fillText(posText, correctedX + 50, y - 15);
             
         } catch (error) {
             console.error('Object tracking draw error:', error);
@@ -746,11 +883,11 @@ class OpenCVBallTracker {
     updateUI() {
         try {
             if (this.trackingQuality > 30) {
-                this.socket.emit('ball-position', this.ballPosition);
+                this.socket.emit('object-position', this.objectPosition);
             }
             
-            document.getElementById('ballPos').textContent = 
-                `X: ${(this.ballPosition.x * 100).toFixed(1)}%, Y: ${(this.ballPosition.y * 100).toFixed(1)}%`;
+            document.getElementById('objectPos').textContent = 
+                `X: ${(this.objectPosition.x * 100).toFixed(1)}%, Y: ${(this.objectPosition.y * 100).toFixed(1)}%`;
             document.getElementById('trackingQuality').textContent = `${this.trackingQuality.toFixed(0)}%`;
         } catch (error) {
             console.error('UI update error:', error);
@@ -759,7 +896,7 @@ class OpenCVBallTracker {
     
     calibrate() {
         this.positionHistory = [];
-        this.ballPosition = { x: 0.5, y: 0.5 };
+        this.objectPosition = { x: 0.5, y: 0.5 };
         this.lastValidPosition = { x: 0.5, y: 0.5 };
         
         this.calibrationMode = true;
@@ -849,13 +986,13 @@ class OpenCVBallTracker {
             });
             const variance = Math.sqrt((rVariance + gVariance + bVariance) / (samples.length * 3));
             
-            // Adaptive tolerances based on color variance within the bounding box
-            const baseHueTolerance = 25;
-            const baseSatTolerance = 100;
-            const baseValTolerance = 100;
+            // More conservative tolerances for better accuracy
+            const baseHueTolerance = 20;
+            const baseSatTolerance = 60;
+            const baseValTolerance = 60;
             
-            // Higher variance = more tolerance needed
-            const adaptiveFactor = Math.min(2.5, Math.max(1.0, variance / 30));
+            // Moderate adaptive factor for better precision
+            const adaptiveFactor = Math.min(2.0, Math.max(1.0, variance / 40));
             
             this.colorTolerance = {
                 h: Math.round(baseHueTolerance * adaptiveFactor),
@@ -863,8 +1000,10 @@ class OpenCVBallTracker {
                 v: Math.round(baseValTolerance * adaptiveFactor)
             };
             
-            // Store the bounding box area for size-based filtering
+            // Store the bounding box area for size-based filtering and MediaPipe region
             this.expectedSize = { width, height, area: width * height };
+            this.calibratedRegion = { left, top, right: left + width, bottom: top + height };
+            this.trackedFeatureIndex = null; // Reset feature selection for MediaPipe
             
             console.log('Adaptive tolerances:', this.colorTolerance);
             console.log('Expected object size:', this.expectedSize);
@@ -874,10 +1013,20 @@ class OpenCVBallTracker {
             this.positionHistory = [];
             this.trackingQuality = 0;
             
-            document.getElementById('status').textContent = 
-                `CALIBRATED! Object selected (${width}x${height}px) RGB(${avgR},${avgG},${avgB}) - Move object to test`;
+            // Exit calibration mode and start tracking automatically
+            this.calibrationMode = false;
+            this.boundingBoxMode = false;
             
-            console.log('=== BOUNDING BOX CALIBRATION SUCCESS ===');
+            // Initialize MediaPipe camera if preferred and available
+            if (this.preferMediaPipe && this.isMediaPipeReady && !this.camera) {
+                this.initMediaPipeCamera();
+            }
+            
+            const trackingMethod = (this.preferMediaPipe && this.isMediaPipeReady) ? 'MediaPipe' : 'OpenCV';
+            document.getElementById('status').textContent = 
+                `TRACKING STARTED with ${trackingMethod}! Object selected (${width}x${height}px) - Move object to test tracking`;
+            
+            console.log('=== BOUNDING BOX CALIBRATION SUCCESS - TRACKING STARTED ===');
             
         } catch (error) {
             console.error('=== CALIBRATION FAILED ===');
@@ -947,13 +1096,118 @@ class OpenCVBallTracker {
         return { h: h / 2, s: s * 255, v: v * 255 }; // OpenCV HSV ranges
     }
     
+    initMediaPipeCamera() {
+        console.log('=== INITIALIZING MEDIAPIPE CAMERA ===');
+        
+        try {
+            if (typeof window.Camera === 'undefined') {
+                console.error('MediaPipe Camera not available');
+                return;
+            }
+            
+            this.camera = new window.Camera(this.video, {
+                onFrame: async () => {
+                    try {
+                        if (this.pose && this.isCalibrated && !this.calibrationMode) {
+                            await this.pose.send({image: this.video});
+                        }
+                    } catch (error) {
+                        console.error('MediaPipe send error:', error);
+                    }
+                },
+                width: this.width,
+                height: this.height
+            });
+            
+            this.camera.start();
+            console.log('MediaPipe camera started successfully');
+            
+        } catch (error) {
+            console.error('Failed to initialize MediaPipe camera:', error);
+            this.preferMediaPipe = false;
+        }
+    }
+    
+    drawMediaPipeTracking(centerX, centerY, landmark, landmarkIndex) {
+        try {
+            const confidence = landmark.visibility || this.trackingQuality / 100;
+            const qualityColor = confidence > 0.7 ? '#00FF00' : 
+                                confidence > 0.4 ? '#FFFF00' : '#FF8800';
+            
+            // Fix mirrored position - since video is mirrored, we need to un-mirror the display
+            const correctedX = this.width - centerX;
+            
+            // Draw a fixed-size bounding box around the tracked feature
+            const boxSize = 60; // Fixed size box
+            const halfBox = boxSize / 2;
+            
+            // Draw bounding rectangle (using corrected position)
+            this.trackingCtx.strokeStyle = qualityColor;
+            this.trackingCtx.lineWidth = 3;
+            this.trackingCtx.strokeRect(correctedX - halfBox, centerY - halfBox, boxSize, boxSize);
+            
+            // Draw corner markers
+            const cornerSize = 8;
+            this.trackingCtx.fillStyle = qualityColor;
+            this.trackingCtx.fillRect(correctedX - halfBox - cornerSize/2, centerY - halfBox - cornerSize/2, cornerSize, cornerSize);
+            this.trackingCtx.fillRect(correctedX + halfBox - cornerSize/2, centerY - halfBox - cornerSize/2, cornerSize, cornerSize);
+            this.trackingCtx.fillRect(correctedX - halfBox - cornerSize/2, centerY + halfBox - cornerSize/2, cornerSize, cornerSize);
+            this.trackingCtx.fillRect(correctedX + halfBox - cornerSize/2, centerY + halfBox - cornerSize/2, cornerSize, cornerSize);
+            
+            // Draw center dot
+            this.trackingCtx.fillStyle = qualityColor;
+            this.trackingCtx.beginPath();
+            this.trackingCtx.arc(correctedX, centerY, 8, 0, 2 * Math.PI);
+            this.trackingCtx.fill();
+            
+            // Show tracking info with confidence
+            this.trackingCtx.fillStyle = '#FFFFFF';
+            this.trackingCtx.font = 'bold 16px Arial';
+            this.trackingCtx.strokeStyle = '#000000';
+            this.trackingCtx.lineWidth = 4;
+            const featureName = this.getLandmarkName(landmarkIndex);
+            const infoText = `FEATURE (${featureName}): ${(confidence * 100).toFixed(0)}%`;
+            this.trackingCtx.strokeText(infoText, correctedX + 50, centerY - 35);
+            this.trackingCtx.fillText(infoText, correctedX + 50, centerY - 35);
+            
+            // Show position coordinates (use corrected position for display)
+            const posText = `X:${(correctedX/this.width*100).toFixed(0)}% Y:${(centerY/this.height*100).toFixed(0)}%`;
+            this.trackingCtx.strokeText(posText, correctedX + 50, centerY - 15);
+            this.trackingCtx.fillText(posText, correctedX + 50, centerY - 15);
+            
+        } catch (error) {
+            console.error('MediaPipe tracking draw error:', error);
+        }
+    }
+    
+    getLandmarkName(index) {
+        const landmarkNames = {
+            0: 'Nose', 11: 'Left Shoulder', 12: 'Right Shoulder',
+            13: 'Left Elbow', 14: 'Right Elbow', 15: 'Left Wrist', 16: 'Right Wrist',
+            23: 'Left Hip', 24: 'Right Hip', 25: 'Left Knee', 26: 'Right Knee',
+            27: 'Left Ankle', 28: 'Right Ankle'
+        };
+        return landmarkNames[index] || `Point ${index}`;
+    }
+    
     cleanup() {
         try {
+            // Cleanup OpenCV matrices
             if (this.src) this.src.delete();
             if (this.hsv) this.hsv.delete();
             if (this.mask) this.mask.delete();
             if (this.contours) this.contours.delete();
             if (this.hierarchy) this.hierarchy.delete();
+            
+            // Cleanup MediaPipe
+            if (this.camera) {
+                this.camera.stop();
+                this.camera = null;
+            }
+            if (this.pose) {
+                this.pose.close();
+                this.pose = null;
+            }
         } catch (error) {
             console.error('Cleanup error:', error);
         }
@@ -986,7 +1240,7 @@ window.addEventListener('load', () => {
     
     console.log('Canvas initialized and ready for video');
     
-    tracker = new OpenCVBallTracker();
+    tracker = new GenericFeatureTracker();
     
     document.getElementById('calibrateBtn').addEventListener('click', () => {
         console.log('=== CALIBRATE BUTTON CLICKED ===');
@@ -1007,10 +1261,14 @@ window.addEventListener('load', () => {
         if (!tracker.calibrationMode || !tracker.boundingBoxMode) return;
         
         const rect = e.target.getBoundingClientRect();
-        const x = (e.clientX - rect.left) * (640 / rect.width);
-        const y = (e.clientY - rect.top) * (480 / rect.height);
+        const x = (e.clientX - rect.left) * (tracker.width / rect.width);
+        const y = (e.clientY - rect.top) * (tracker.height / rect.height);
         
         console.log('=== MOUSE DOWN - START BOUNDING BOX ===');
+        console.log('Mouse client coords:', e.clientX, e.clientY);
+        console.log('Canvas rect:', rect.width, 'x', rect.height);
+        console.log('Tracker dimensions:', tracker.width, 'x', tracker.height);
+        console.log('Calculated canvas coords:', x, y);
         tracker.boundingBox = {
             startX: x,
             startY: y,
@@ -1025,8 +1283,8 @@ window.addEventListener('load', () => {
         if (!tracker.calibrationMode || !tracker.boundingBoxMode || !tracker.boundingBox.isDrawing) return;
         
         const rect = e.target.getBoundingClientRect();
-        const x = (e.clientX - rect.left) * (640 / rect.width);
-        const y = (e.clientY - rect.top) * (480 / rect.height);
+        const x = (e.clientX - rect.left) * (tracker.width / rect.width);
+        const y = (e.clientY - rect.top) * (tracker.height / rect.height);
         
         tracker.boundingBox.endX = x;
         tracker.boundingBox.endY = y;
@@ -1037,20 +1295,19 @@ window.addEventListener('load', () => {
         if (!tracker.calibrationMode || !tracker.boundingBoxMode || !tracker.boundingBox.isDrawing) return;
         
         const rect = e.target.getBoundingClientRect();
-        const x = (e.clientX - rect.left) * (640 / rect.width);
-        const y = (e.clientY - rect.top) * (480 / rect.height);
+        const x = (e.clientX - rect.left) * (tracker.width / rect.width);
+        const y = (e.clientY - rect.top) * (tracker.height / rect.height);
         
         tracker.boundingBox.endX = x;
         tracker.boundingBox.endY = y;
         tracker.boundingBox.isDrawing = false;
         
         console.log('=== MOUSE UP - FINISH BOUNDING BOX ===');
+        console.log('Final mouse coords:', x, y);
         console.log('Final bounding box:', tracker.boundingBox);
         
         if (typeof tracker.calibrateFromBoundingBox === 'function') {
             tracker.calibrateFromBoundingBox();
-            tracker.calibrationMode = false;
-            tracker.boundingBoxMode = false;
             console.log('Calibration completed');
         } else {
             console.error('calibrateFromBoundingBox method not found');

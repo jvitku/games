@@ -39,7 +39,7 @@
                 </div>
             </div>
             <div class="tracking-info">
-                <p>Ball Position: <span id="ballPos">Not detected</span></p>
+                <p>Object Position: <span id="objectPos">Not detected</span></p>
                 <p>Status: <span id="status">Initializing...</span></p>
                 <p>Tracking Quality: <span id="trackingQuality">0%</span></p>
             </div>
@@ -49,6 +49,10 @@
     <script src="/socket.io/socket.io.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
     <script src="game.js"></script>
     <script src="tracking.js"></script>
     <script async src="https://docs.opencv.org/4.5.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
