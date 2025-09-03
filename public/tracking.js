@@ -883,6 +883,7 @@ class GenericFeatureTracker {
     updateUI() {
         try {
             if (this.trackingQuality > 30) {
+                console.log('Sending object position:', this.objectPosition, 'Quality:', this.trackingQuality);
                 this.socket.emit('object-position', this.objectPosition);
             }
             

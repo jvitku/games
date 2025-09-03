@@ -23,8 +23,10 @@ app.get('/', (req, res) => {
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
   
-  socket.on('ball-position', (data) => {
-    socket.broadcast.emit('ball-position', data);
+  socket.on('object-position', (data) => {
+    console.log('Server received object-position:', data);
+    socket.broadcast.emit('object-position', data);
+    console.log('Server broadcasted object-position to other clients');
   });
   
   socket.on('disconnect', () => {

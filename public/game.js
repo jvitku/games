@@ -26,8 +26,8 @@ class HockeyIceAdventure {
         this.iceParticles = [];
         
         // Player control
-        this.ballPosition = { x: 0.5, y: 0.5 };
-        this.targetPosition = { x: 0, y: 0, z: 0 };
+        this.objectPosition = { x: 0.5, y: 0.5 };
+        this.targetPosition = new THREE.Vector3(0, 0, 8); // Initialize as Vector3 matching player start position
         
         // Animation mixers
         this.mixers = [];
@@ -410,8 +410,20 @@ class HockeyIceAdventure {
     }
     
     initEventListeners() {
-        document.getElementById('startBtn').addEventListener('click', () => this.startGame());
-        document.getElementById('resetBtn').addEventListener('click', () => this.resetGame());
+        const startBtn = document.getElementById('startBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        
+        console.log('Setting up event listeners. Start button:', startBtn, 'Reset button:', resetBtn);
+        
+        startBtn.addEventListener('click', () => {
+            console.log('Start button clicked!');
+            this.startGame();
+        });
+        
+        resetBtn.addEventListener('click', () => {
+            console.log('Reset button clicked!');
+            this.resetGame();
+        });
         
         // Speed slider control
         const speedSlider = document.getElementById('speedSlider');
@@ -422,28 +434,58 @@ class HockeyIceAdventure {
             speedValue.textContent = this.gameSpeed.toFixed(1) + 'x';
         });
         
-        this.socket.on('ball-position', (data) => {
-            this.ballPosition = data;
-            if (this.gameState === 'playing') {
-                this.updatePlayerFromBall(data);
-            }
+        this.socket.on('object-position', (data) => {
+            console.log('Game received object position:', data, 'Game state:', this.gameState);
+            this.objectPosition = data;
+            // Always update player position, regardless of game state
+            console.log('Updating player position');
+            this.updatePlayerFromObject(data);
         });
     }
     
-    updatePlayerFromBall(ballPos) {
-        if (!this.player) return;
+    updatePlayerFromObject(objectPos) {
+        console.log('updatePlayerFromObject called with:', objectPos, 'Player exists:', !!this.player);
+        if (!this.player) {
+            console.log('Player object not found!');
+            return;
+        }
         
-        // Map ball position to ice rink (natural control) - bigger field
-        this.targetPosition.x = (ballPos.x - 0.5) * 36; // -18 to +18 (bigger width)
+        // Map object position to ice rink (natural control) - bigger field
+        // Fix mirroring: invert X coordinate since tracking shows mirrored view
+        this.targetPosition.x = (0.5 - objectPos.x) * 36; // Inverted: when you move right, player moves right
         this.targetPosition.y = 0;
-        this.targetPosition.z = (ballPos.y - 0.5) * 24; // -12 to +12 (bigger height, not inverted)
+        this.targetPosition.z = (objectPos.y - 0.5) * 24; // -12 to +12 (bigger height, not inverted)
         
         // Keep player on ice rink (bigger bounds)
         this.targetPosition.x = Math.max(-18, Math.min(18, this.targetPosition.x));
         this.targetPosition.z = Math.max(-12, Math.min(12, this.targetPosition.z));
+        
+        console.log('Updated target position:', this.targetPosition, 'from object pos:', objectPos);
+        console.log('Current player position:', this.player.position);
+    }
+    
+    updatePlayerMovement(delta, time) {
+        // Smooth player movement (works in any game state)
+        if (this.player) {
+            const oldPos = { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
+            this.player.position.lerp(this.targetPosition, 0.15);
+            const newPos = { x: this.player.position.x, y: this.player.position.y, z: this.player.position.z };
+            
+            // Log movement every 60 frames to avoid spam
+            if (this.frameCount && this.frameCount % 60 === 0) {
+                console.log('Player movement - Target:', this.targetPosition, 'Old pos:', oldPos, 'New pos:', newPos);
+            }
+            
+            // Player skating animation (slight wobble)
+            this.player.rotation.y = Math.sin(time * 5) * 0.1;
+            
+            // Create ice skating trail effect
+            this.createSkatingTrail();
+        }
     }
     
     startGame() {
+        console.log('startGame() called - changing state from', this.gameState, 'to playing');
         this.gameState = 'playing';
         this.score = 0;
         this.lives = 3;
@@ -452,6 +494,7 @@ class HockeyIceAdventure {
         this.createPowerUps();
         this.startTimer();
         document.getElementById('status').textContent = 'Hockey Time! Avoid the snowmen and collect pucks!';
+        console.log('Game state is now:', this.gameState);
     }
     
     resetGame() {
@@ -498,6 +541,9 @@ class HockeyIceAdventure {
         
         this.updateSnow();
         
+        // Always update player movement
+        this.updatePlayerMovement(delta, time);
+        
         if (this.gameState === 'playing') {
             this.updateGame(delta, time);
         }
@@ -526,16 +572,11 @@ class HockeyIceAdventure {
     }
     
     updateGame(delta, time) {
-        // Smooth player movement
-        if (this.player) {
-            this.player.position.lerp(this.targetPosition, 0.15);
-            
-            // Player skating animation (slight wobble)
-            this.player.rotation.y = Math.sin(time * 5) * 0.1;
-            
-            // Create ice skating trail effect
-            this.createSkatingTrail();
-        }
+        // Add frame counter for debugging
+        if (!this.frameCount) this.frameCount = 0;
+        this.frameCount++;
+        // Always update player movement, even when game is not playing
+        this.updatePlayerMovement(delta, time);
         
         // Update snowmen enemies - straight line movement
         this.snowmen.forEach(snowman => {
